@@ -1,0 +1,24 @@
+name: Setup Go and Node
+description: setup-go (+ optional setup-node) with dependency caching.
+inputs:
+  go-version-file:
+    description: Path to the file that declares the Go version.
+    default: go.mod
+  node-version:
+    default: "22"
+  setup-node:
+    description: Whether to also set up Node.
+    default: "true"
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-go@v6
+      with:
+        go-version-file: ${{ inputs.go-version-file }}
+        cache: true
+    - if: inputs.setup-node == 'true'
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ inputs.node-version }}
+        cache: npm
+        cache-dependency-path: package-lock.json

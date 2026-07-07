@@ -1,0 +1,47 @@
+name: Publish UI package
+on:
+  workflow_call:
+    inputs:
+      package-dir:   { type: string, required: true }   # e.g. packages/statushub-ui
+      tag-name:      { type: string, required: true }   # e.g. statushub-ui-v1.2.3
+      tag-prefix:    { type: string, required: true }   # e.g. statushub-ui-v
+      build-script:  { type: string, default: "build:ui" }
+      test-script:   { type: string, default: "test:ui" }
+      node-ci-flags: { type: string, default: "" }
+    secrets:
+      NPM_TOKEN: { required: true }
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: https://registry.npmjs.org
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - run: npm ci ${{ inputs.node-ci-flags }}
+      - name: Verify version matches tag
+        working-directory: ${{ inputs.package-dir }}
+        run: |
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          TAG_VERSION="${{ inputs.tag-name }}"
+          TAG_VERSION="${TAG_VERSION#${{ inputs.tag-prefix }}}"
+          if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::package.json version ($PKG_VERSION) does not match tag ($TAG_VERSION)"
+            exit 1
+          fi
+      - name: Build
+        run: npm run ${{ inputs.build-script }}
+      - name: Test
+        run: npm run ${{ inputs.test-script }}
+      - name: Publish
+        working-directory: ${{ inputs.package-dir }}
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

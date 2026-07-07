@@ -1,0 +1,118 @@
+name: Go Service CI
+on:
+  workflow_call:
+    inputs:
+      go-version-file: { type: string, default: go.mod }
+      test-mode:       { type: string, default: testcontainers }  # testcontainers | services
+      embed-frontend:  { type: boolean, default: false }
+      frontend-build:  { type: boolean, default: false }
+      ui-package:      { type: string, default: "" }
+      helm-chart:      { type: string, default: "" }
+      node-ci-flags:   { type: string, default: "" }
+      check-ent-drift: { type: boolean, default: true }
+    secrets:
+      CI_TOKEN: { required: true }
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: knkcs/workflows/actions/configure-private-modules@v1
+        with:
+          ci-token: ${{ secrets.CI_TOKEN }}
+      - uses: knkcs/workflows/actions/setup-go-node@v1
+        with:
+          go-version-file: ${{ inputs.go-version-file }}
+          setup-node: ${{ inputs.embed-frontend }}
+      - name: Create frontend stub for embed
+        if: ${{ inputs.embed-frontend }}
+        run: mkdir -p web/dist && echo '<!doctype html>' > web/dist/index.html
+      - name: Check ent client is up to date
+        if: ${{ inputs.check-ent-drift }}
+        run: |
+          GOWORK=off go generate ./internal/ent
+          git diff --quiet -- internal/ent/db || {
+            echo "::error::internal/ent/db is stale — run 'make generate-ent' and commit the result";
+            git diff --stat -- internal/ent/db; exit 1;
+          }
+      - name: Vet
+        run: go vet ./...
+
+  test-testcontainers:
+    if: ${{ inputs.test-mode == 'testcontainers' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: knkcs/workflows/actions/configure-private-modules@v1
+        with:
+          ci-token: ${{ secrets.CI_TOKEN }}
+      - uses: knkcs/workflows/actions/setup-go-node@v1
+        with:
+          go-version-file: ${{ inputs.go-version-file }}
+          setup-node: "false"
+      - name: Create frontend stub for embed
+        if: ${{ inputs.embed-frontend }}
+        run: mkdir -p web/dist && echo '<!doctype html>' > web/dist/index.html
+      - name: Test
+        run: go test -race -cover ./...
+
+  test-services:
+    if: ${{ inputs.test-mode == 'services' }}
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env: { POSTGRES_USER: ci, POSTGRES_PASSWORD: ci, POSTGRES_DB: ci }
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U ci" --health-interval 10s
+          --health-timeout 5s --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 10s
+          --health-timeout 5s --health-retries 5
+    steps:
+      - uses: actions/checkout@v6
+      - uses: knkcs/workflows/actions/configure-private-modules@v1
+        with:
+          ci-token: ${{ secrets.CI_TOKEN }}
+      - uses: knkcs/workflows/actions/setup-go-node@v1
+        with:
+          go-version-file: ${{ inputs.go-version-file }}
+          setup-node: "false"
+      - name: Create frontend stub for embed
+        if: ${{ inputs.embed-frontend }}
+        run: mkdir -p web/dist && echo '<!doctype html>' > web/dist/index.html
+      - name: Test
+        run: go test -race -cover ./...
+
+  ui:
+    if: ${{ inputs.ui-package != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with: { node-version: "22", cache: npm, cache-dependency-path: package-lock.json }
+      - run: npm ci ${{ inputs.node-ci-flags }}
+      - name: Build UI package
+        run: npm run -w ${{ inputs.ui-package }} build
+      - name: Build embedded frontend
+        if: ${{ inputs.frontend-build }}
+        run: npm run -w web build
+      - name: Typecheck UI package
+        working-directory: ${{ inputs.ui-package }}
+        run: npx tsc --noEmit
+
+  helm:
+    if: ${{ inputs.helm-chart != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: azure/setup-helm@v5
+      - run: helm lint ${{ inputs.helm-chart }}
