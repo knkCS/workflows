@@ -4,6 +4,14 @@ on:
     inputs:
       config-file:   { type: string, default: release-please-config.json }
       manifest-file: { type: string, default: .release-please-manifest.json }
+    secrets:
+      # Optional PAT. When provided, release-please creates the Release PR as
+      # that identity, so branch-protection required checks (which do NOT run on
+      # GITHUB_TOKEN-created PRs) DO run and the Release PR can merge normally.
+      # Falls back to GITHUB_TOKEN when absent (Release PRs then need an admin
+      # merge if required checks are enforced).
+      CI_TOKEN:
+        required: false
     outputs:
       releases_created:
         value: ${{ jobs.release-please.outputs.releases_created }}
@@ -27,6 +35,6 @@ jobs:
       - uses: googleapis/release-please-action@v4
         id: rp
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.CI_TOKEN || secrets.GITHUB_TOKEN }}
           config-file: ${{ inputs.config-file }}
           manifest-file: ${{ inputs.manifest-file }}
