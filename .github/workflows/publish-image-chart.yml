@@ -5,6 +5,7 @@ on:
       chart-path: { type: string, required: true }    # e.g. charts/statushub
       chart-name: { type: string, required: true }    # e.g. statushub
       version:    { type: string, required: true }    # e.g. 1.2.3 (no leading v)
+      ref:        { type: string, required: false, default: '' }  # git ref to build from (defaults to the triggering commit)
     secrets:
       CI_TOKEN: { required: true }
 
@@ -28,8 +29,17 @@ jobs:
           - platform: linux/arm64
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
+    # One output key per matrix leg; each leg writes only its own key, and the
+    # runner drops empty-string outputs, so the legs cannot clobber each other.
+    # Digests travel as job outputs, NOT artifacts: artifact storage counts
+    # against the org-wide Actions quota and quota exhaustion blocked releases.
+    outputs:
+      digest-amd64: ${{ steps.digest.outputs.digest-amd64 }}
+      digest-arm64: ${{ steps.digest.outputs.digest-arm64 }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref }}
       - name: Compute refs
         id: vars
         run: |
@@ -60,16 +70,8 @@ jobs:
           cache-to: type=gha,mode=max,scope=${{ steps.vars.outputs.arch }}
           outputs: type=image,name=${{ steps.vars.outputs.image }},push-by-digest=true,name-canonical=true,push=true
       - name: Export digest
-        run: |
-          mkdir -p /tmp/digests
-          digest="${{ steps.build.outputs.digest }}"
-          touch "/tmp/digests/${digest#sha256:}"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: digest-${{ steps.vars.outputs.arch }}
-          path: /tmp/digests/*
-          retention-days: 1
-          if-no-files-found: error
+        id: digest
+        run: echo "digest-${{ steps.vars.outputs.arch }}=${{ steps.build.outputs.digest }}" >> "$GITHUB_OUTPUT"
 
   # Assemble the per-arch digests into a single multi-arch manifest under the
   # release tags, then publish the Helm chart once.
@@ -78,6 +80,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref }}
+      - name: Validate digests
+        run: |
+          test -n "${{ needs.build.outputs.digest-amd64 }}" || { echo "missing amd64 digest"; exit 1; }
+          test -n "${{ needs.build.outputs.digest-arm64 }}" || { echo "missing arm64 digest"; exit 1; }
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v4
         with:
@@ -89,18 +97,13 @@ jobs:
         run: |
           echo "image=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
           echo "owner=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
-      - uses: actions/download-artifact@v4
-        with:
-          path: /tmp/digests
-          pattern: digest-*
-          merge-multiple: true
       - name: Create multi-arch manifest (version + latest)
-        working-directory: /tmp/digests
         run: |
           docker buildx imagetools create \
             -t ${{ steps.vars.outputs.image }}:${{ inputs.version }} \
             -t ${{ steps.vars.outputs.image }}:latest \
-            $(printf '${{ steps.vars.outputs.image }}@sha256:%s ' *)
+            ${{ steps.vars.outputs.image }}@${{ needs.build.outputs.digest-amd64 }} \
+            ${{ steps.vars.outputs.image }}@${{ needs.build.outputs.digest-arm64 }}
       - name: Inspect manifest
         run: docker buildx imagetools inspect ${{ steps.vars.outputs.image }}:${{ inputs.version }}
       - uses: azure/setup-helm@v5
