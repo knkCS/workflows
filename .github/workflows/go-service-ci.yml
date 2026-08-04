@@ -4,6 +4,7 @@ on:
     inputs:
       go-version-file: { type: string, default: go.mod }
       test-mode:       { type: string, default: testcontainers }  # testcontainers | services
+      test-timeout:    { type: string, default: 30m }             # go test -timeout; see the Test steps
       embed-frontend:  { type: boolean, default: false }
       frontend-build:  { type: boolean, default: false }
       ui-package:      { type: string, default: "" }
@@ -57,8 +58,13 @@ jobs:
       - name: Create frontend stub for embed
         if: ${{ inputs.embed-frontend }}
         run: mkdir -p web/dist && echo '<!doctype html>' > web/dist/index.html
+      # -timeout is explicit because Go's default is 600s PER PACKAGE, and a
+      # package that outgrows it fails with a stack dump that reads like a
+      # deadlock rather than a slow suite. A green run here is otherwise only
+      # evidence that this runner happened to be fast enough — margin, not
+      # configuration. Raise `test-timeout` for a slow suite; do not remove it.
       - name: Test
-        run: go test -race -cover ./...
+        run: go test -race -cover -timeout ${{ inputs.test-timeout }} ./...
 
   test-services:
     if: ${{ inputs.test-mode == 'services' }}
@@ -89,8 +95,13 @@ jobs:
       - name: Create frontend stub for embed
         if: ${{ inputs.embed-frontend }}
         run: mkdir -p web/dist && echo '<!doctype html>' > web/dist/index.html
+      # -timeout is explicit because Go's default is 600s PER PACKAGE, and a
+      # package that outgrows it fails with a stack dump that reads like a
+      # deadlock rather than a slow suite. A green run here is otherwise only
+      # evidence that this runner happened to be fast enough — margin, not
+      # configuration. Raise `test-timeout` for a slow suite; do not remove it.
       - name: Test
-        run: go test -race -cover ./...
+        run: go test -race -cover -timeout ${{ inputs.test-timeout }} ./...
 
   ui:
     if: ${{ inputs.ui-package != '' }}
