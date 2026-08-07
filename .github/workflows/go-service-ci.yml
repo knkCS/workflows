@@ -8,9 +8,12 @@ on:
       embed-frontend:  { type: boolean, default: false }
       frontend-build:  { type: boolean, default: false }
       ui-package:      { type: string, default: "" }
+      ui-lint:         { type: boolean, default: false }          # each UI workspace's own `lint` script
+      ui-test:         { type: boolean, default: false }          # each UI workspace's own `test` script
       helm-chart:      { type: string, default: "" }
       node-ci-flags:   { type: string, default: "" }
       check-ent-drift: { type: boolean, default: true }
+      check-gofmt:     { type: boolean, default: false }          # fail on a tracked Go file that is not gofmt-clean
     secrets:
       CI_TOKEN: { required: true }
 
@@ -21,6 +24,19 @@ jobs:
   backend:
     runs-on: ubuntu-latest
     steps:
+      # ui-lint and ui-test run in the `ui` job, which exists only when
+      # `ui-package` is set — so on their own they would be silently ignored, and
+      # a gate that reports nothing while looking switched on is the exact failure
+      # these inputs were added to remove. They therefore REQUIRE `ui-package`
+      # rather than implying it: the workflow cannot guess which workspace to run,
+      # and a default of "the repo root" is the root-level invocation the UI job's
+      # comment explains is worthless. This check lives here because `backend` is
+      # the only job that always runs; it needs no checkout, so it fails in seconds.
+      - name: Reject UI gates without a UI package
+        if: ${{ (inputs.ui-lint || inputs.ui-test) && inputs.ui-package == '' }}
+        run: |
+          echo "::error::ui-lint/ui-test require ui-package — the UI job only runs when one is set"
+          exit 1
       - uses: actions/checkout@v6
       - uses: knkcs/workflows/actions/configure-private-modules@v1
         with:
@@ -40,6 +56,46 @@ jobs:
             echo "::error::internal/ent/db is stale — run 'make generate-ent' and commit the result";
             git diff --stat -- internal/ent/db; exit 1;
           }
+      # Three things below are load-bearing, the first two learned in
+      # knkCS/taskhub#34; none survives being "simplified" into a one-liner.
+      #
+      # `git ls-files`, NOT `gofmt -l .`: gofmt walks EVERYTHING under the path it
+      # is handed — dot-directories, node_modules/ and testdata/ included — so
+      # `gofmt -l .` reports npm dependencies and, in a checkout carrying agent
+      # worktrees under .claude/, other branches' files as this tree's drift.
+      #
+      # Failing on a NON-ZERO EXIT, not only on a non-empty list, is the gate. On
+      # a file it cannot parse, gofmt writes the error to stderr, lists NOTHING on
+      # stdout and exits 2 — so a bare `gofmt -l` reads as "clean" and this step
+      # goes green on a tree that does not compile, which is the failure it exists
+      # to prevent. taskhub shipped that bug once. It also means a tracked file
+      # deleted in the working tree fails here rather than being skipped: a loud,
+      # accurate report of an index/worktree disagreement.
+      #
+      # `set -o pipefail` is what makes that true of the WHOLE pipeline. The
+      # runner's default shell is `bash -e`, which is not `-o pipefail`, so a
+      # pipeline takes the exit status of its LAST command — a failing
+      # `git ls-files` would leave xargs succeeding over empty input, and the empty
+      # list would read as "clean" again through a different door.
+      #
+      # Nothing is excluded, generated code included: generated Go is gofmt-clean,
+      # so a blanket check costs nothing while an exclusion list is somewhere for
+      # real drift to hide. If it ever fires on generated output, regenerate that
+      # output — do not hand-format it.
+      - name: Check Go files are gofmt-clean
+        if: ${{ inputs.check-gofmt }}
+        run: |
+          set -o pipefail
+          if ! unformatted=$(git ls-files -z '*.go' | xargs -0 -r gofmt -l); then
+            echo "::error::gofmt could not read a tracked Go file — its own error is above"
+            exit 1
+          fi
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt: these tracked files are not formatted"
+            echo "$unformatted" | sed 's/^/  /'
+            printf 'fix with: gofmt -w %s\n' "$(echo "$unformatted" | tr '\n' ' ')"
+            exit 1
+          fi
       - name: Vet
         run: go vet ./...
 
@@ -111,6 +167,46 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: "22", cache: npm, cache-dependency-path: package-lock.json }
       - run: npm ci ${{ inputs.node-ci-flags }}
+      # Each workspace's OWN `lint` / `test` script, never a root-level
+      # `npx biome check .`: a repo whose packages each declare their own
+      # biome.json has no root config, and biome aborts on "Found a nested root
+      # configuration" having checked nothing — a green step that linted zero
+      # files. Calling the package script also keeps ONE definition of what
+      # linting or testing a package means, shared with the local `make lint`,
+      # so CI and a developer's machine cannot drift apart.
+      #
+      # The consequence for a caller: opting in REQUIRES the covered workspaces
+      # to declare the script. `npm run -w <ws> <script>` fails on a missing one,
+      # deliberately — a gate that skips what it cannot find is the gate these
+      # inputs replace (knkCS/taskhub#163: a job that built and never tested,
+      # while a doc claimed a translation-parity test broke the build).
+      #
+      # The two gates deliberately cover DIFFERENT workspaces, which is taskhub's
+      # split rather than an oversight. Linting is per package — every workspace
+      # has a style to hold — so `ui-lint` covers `ui-package` plus `web` when
+      # `frontend-build` is on, `frontend-build` being this workflow's existing
+      # signal that the repo has an embedded `web` workspace this job owns.
+      # Testing is not: the real UI is `ui-package`, an embedded `web` host is a
+      # thin shell, and both reference repos reflect that — taskhub's `web` has no
+      # `test` script at all, while messengerhub tests its shell in a bespoke job
+      # of its own. So `ui-test` covers `ui-package` alone; a repo wanting its
+      # shell's suite in CI keeps it beside the shared call, the way messengerhub
+      # already keeps `collisions` there.
+      #
+      # These run before the builds, as taskhub's job does: lint and test are the
+      # cheap signals and should not queue behind a Vite build. That assumes a
+      # suite resolving the package from SOURCE (both reference repos alias it in
+      # their vitest config); a suite needing the built `dist/` is the reason to
+      # revisit the order.
+      - name: Lint UI package
+        if: ${{ inputs.ui-lint }}
+        run: npm run -w ${{ inputs.ui-package }} lint
+      - name: Lint embedded frontend
+        if: ${{ inputs.ui-lint && inputs.frontend-build }}
+        run: npm run -w web lint
+      - name: Test UI package
+        if: ${{ inputs.ui-test }}
+        run: npm run -w ${{ inputs.ui-package }} test
       - name: Build UI package
         run: npm run -w ${{ inputs.ui-package }} build
       - name: Build embedded frontend
