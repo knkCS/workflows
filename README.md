@@ -32,12 +32,13 @@ via `secrets:` / `secrets: inherit` at call time.
 | `ui-test` | boolean | `false` | Run `ui-package`'s own `test` script |
 | `helm-chart` | string | `""` | Chart path to `helm lint`. Empty means the `helm` job does not run |
 | `node-ci-flags` | string | `""` | Extra flags for `npm ci` (e.g. `--legacy-peer-deps`) |
+| `npm-github-packages` | boolean | `false` | Authenticate `npm ci` to `npm.pkg.github.com` with `CI_TOKEN` in the `ui` job |
 | `check-ent-drift` | boolean | `true` | Regenerate `internal/ent` and fail if `internal/ent/db` drifts |
 | `check-gofmt` | boolean | `false` | Fail the `backend` job if any **tracked** Go file is not gofmt-clean |
 
-`check-gofmt`, `ui-lint` and `ui-test` are opt-in and default to off, so enabling
-them is always a deliberate change to a caller's CI. Three things to know before
-turning them on:
+`check-gofmt`, `ui-lint`, `ui-test` and `npm-github-packages` are opt-in and
+default to off, so enabling them is always a deliberate change to a caller's CI.
+Four things to know before turning them on:
 
 - **`check-gofmt` checks tracked files and fails on an unparseable one.** It lists
   them with `git ls-files`, so `node_modules/` and any other worktrees in the
@@ -50,9 +51,19 @@ turning them on:
   own beside the shared call if you want one. Each covered workspace **must
   declare the script**: `npm run -w <workspace> <script>` fails on a missing one
   rather than skipping it.
-- **Both require `ui-package`.** The `ui` job runs only when one is set, so
+- **`ui-lint` and `ui-test` require `ui-package`.** The `ui` job runs only when one is set, so
   setting either without it is refused loudly in the `backend` job instead of
   being silently ignored.
+- **`npm-github-packages` writes only the credential.** Before `npm ci`, the
+  `ui` job appends `//npm.pkg.github.com/:_authToken=<CI_TOKEN>` to the runner's
+  `~/.npmrc` — GitHub Packages rejects installs without a token, even for public
+  packages. The scope→registry mapping (e.g.
+  `@knkcms:registry=https://npm.pkg.github.com`) belongs in the **caller's
+  committed `.npmrc`**; without it the token is never consulted, and with it but
+  without this input, `npm ci` fails with a 401. `CI_TOKEN` must carry
+  `read:packages` for the scopes the lockfile pulls. Without `ui-package` the
+  input is inert — no job runs `npm ci` — and unlike the gates above it is not
+  refused: an unused credential misleads no one, where a skipped gate lies.
 
 ## Composite actions (`actions/`)
 
