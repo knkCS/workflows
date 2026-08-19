@@ -2,18 +2,19 @@ name: Go Service CI
 on:
   workflow_call:
     inputs:
-      go-version-file: { type: string, default: go.mod }
-      test-mode:       { type: string, default: testcontainers }  # testcontainers | services
-      test-timeout:    { type: string, default: 30m }             # go test -timeout; see the Test steps
-      embed-frontend:  { type: boolean, default: false }
-      frontend-build:  { type: boolean, default: false }
-      ui-package:      { type: string, default: "" }
-      ui-lint:         { type: boolean, default: false }          # each UI workspace's own `lint` script
-      ui-test:         { type: boolean, default: false }          # each UI workspace's own `test` script
-      helm-chart:      { type: string, default: "" }
-      node-ci-flags:   { type: string, default: "" }
-      check-ent-drift: { type: boolean, default: true }
-      check-gofmt:     { type: boolean, default: false }          # fail on a tracked Go file that is not gofmt-clean
+      go-version-file:     { type: string, default: go.mod }
+      test-mode:           { type: string, default: testcontainers }  # testcontainers | services
+      test-timeout:        { type: string, default: 30m }             # go test -timeout; see the Test steps
+      embed-frontend:      { type: boolean, default: false }
+      frontend-build:      { type: boolean, default: false }
+      ui-package:          { type: string, default: "" }
+      ui-lint:             { type: boolean, default: false }          # each UI workspace's own `lint` script
+      ui-test:             { type: boolean, default: false }          # each UI workspace's own `test` script
+      helm-chart:          { type: string, default: "" }
+      node-ci-flags:       { type: string, default: "" }
+      npm-github-packages: { type: boolean, default: false }          # write CI_TOKEN into ~/.npmrc so `npm ci` can reach npm.pkg.github.com
+      check-ent-drift:     { type: boolean, default: true }
+      check-gofmt:         { type: boolean, default: false }          # fail on a tracked Go file that is not gofmt-clean
     secrets:
       CI_TOKEN: { required: true }
 
@@ -166,6 +167,21 @@ jobs:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v4
         with: { node-version: "22", cache: npm, cache-dependency-path: package-lock.json }
+      # GitHub Packages refuses even public-package installs without a token, so
+      # a caller whose lockfile pulls anything from npm.pkg.github.com (e.g. the
+      # @knkcms scope) 401s on a bare `npm ci`. Opting in writes ONLY the
+      # credential, and to the runner's user-level ~/.npmrc — the scope→registry
+      # mapping belongs in the caller's committed .npmrc, where the caller
+      # decides which scopes resolve to GitHub Packages; without that mapping
+      # this token is simply never consulted. Same credential shape knkcms/core's
+      # repo-local CI writes. The token reaches the script via `env:` rather than
+      # ${{ }} interpolation (publish-ui.yml's pattern for NODE_AUTH_TOKEN):
+      # interpolating would paste the secret into the rendered script itself.
+      - name: Authenticate npm to GitHub Packages
+        if: ${{ inputs.npm-github-packages }}
+        run: echo "//npm.pkg.github.com/:_authToken=${CI_TOKEN}" >> ~/.npmrc
+        env:
+          CI_TOKEN: ${{ secrets.CI_TOKEN }}
       - run: npm ci ${{ inputs.node-ci-flags }}
       # Each workspace's OWN `lint` / `test` script, never a root-level
       # `npx biome check .`: a repo whose packages each declare their own
