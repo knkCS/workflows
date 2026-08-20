@@ -17,6 +17,11 @@ via `secrets:` / `secrets: inherit` at call time.
 | `release-please.yml` | release-please PR + release automation |
 | `publish-image-chart.yml` | Build+push image and Helm chart to GHCR |
 | `publish-ui.yml` | Publish a UI npm package to GitHub Packages |
+| `argocd-rendering-check.yml` | Render a deploy repo's ArgoCD Applications with their real value files and schema-validate the output |
+
+`self-test.yml` is not reusable: it is this repo's own CI, running each engine
+script's fixture self-test (currently `tests/rendering-check/run.sh`) on PRs
+that touch it.
 
 ### `go-service-ci.yml` inputs
 
@@ -64,6 +69,42 @@ Four things to know before turning them on:
   `read:packages` for the scopes the lockfile pulls. Without `ui-package` the
   input is inert — no job runs `npm ci` — and unlike the gates above it is not
   refused: an unused credential misleads no one, where a skipped gate lies.
+
+### `argocd-rendering-check.yml` inputs
+
+For GitOps deploy repos (knkcms/deploy is the canonical layout). On every PR it
+expands each ApplicationSet's generators, renders every generated Application
+with `helm template` over its declared sources — service-repo git charts,
+upstream Helm/OCI charts, and charts held in the deploy repo — feeding in the
+real value files (`$ref/...` entries resolve through the PR's checkout), then
+schema-validates the rendered manifests with kubeconform. A values typo, a
+missing value file, or a render that breaks the Kubernetes schema fails the
+check before ArgoCD ever sees the commit.
+
+| Input | Type | Default | Effect |
+|---|---|---|---|
+| `argocd-dir` | string | `argocd` | Directory scanned (recursively) for Application/ApplicationSet documents |
+| `skip-environments` | string | `""` | Comma/space-separated `environment` generator params to skip — the knob for environments declared unwired |
+| `kubernetes-version` | string | `1.31.0` | Passed to `helm template --kube-version` and `kubeconform -kubernetes-version` |
+| `kubeconform-flags` | string | `-strict -ignore-missing-schemas` | Extra kubeconform flags (e.g. add a CRD schema location) |
+| `kubeconform-version` | string | `0.6.7` | kubeconform release installed (static binary, no leading `v`) |
+
+`CI_TOKEN` must carry read access to every private service repo the
+ApplicationSets pull charts from. A thin caller:
+
+```yaml
+jobs:
+  rendering-check:
+    uses: knkcs/workflows/.github/workflows/argocd-rendering-check.yml@v1
+    secrets:
+      CI_TOKEN: ${{ secrets.CI_TOKEN }}
+```
+
+The engine is `scripts/argocd-rendering-check.py`; its module comment is the
+reference for the exact source shapes and semantics. Its fixture self-test
+(`tests/rendering-check/run.sh`, run by `self-test.yml`) proves the check green
+on a correct layout and red on a missing value file and on a schema-breaking
+values typo.
 
 ## Composite actions (`actions/`)
 

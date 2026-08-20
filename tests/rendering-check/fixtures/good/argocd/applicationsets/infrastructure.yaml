@@ -1,0 +1,53 @@
+# Shape 2 (knkcms/deploy infrastructure.yaml): an upstream Helm-repository
+# chart (`chart:` + repoURL, never `path:`), with per-environment overrides
+# that may legitimately be absent — ignoreMissingValueFiles. The self-test
+# serves the chart from a localhost Helm repository on port 8879 so the check
+# stays hermetic; only the staging/production override files are exercised as
+# missing here (neither exists, both are skipped).
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: fixture-infrastructure
+  namespace: argocd
+spec:
+  generators:
+    - matrix:
+        generators:
+          - list:
+              elements:
+                - name: demo-infra
+                  chartRepo: http://127.0.0.1:8879
+                  chartName: demo
+                  chartVersion: "0.1.0"
+                  valuesFile: demo-infra-values.yaml
+          - list:
+              elements:
+                - environment: staging
+                - environment: production
+  template:
+    metadata:
+      name: "fixture-{{name}}-{{environment}}"
+      namespace: argocd
+    spec:
+      project: default
+      sources:
+        - repoURL: "{{chartRepo}}"
+          targetRevision: "{{chartVersion}}"
+          chart: "{{chartName}}"
+          helm:
+            valueFiles:
+              - $deploy/base/infrastructure/{{valuesFile}}
+              - $deploy/environments/{{environment}}/infrastructure/{{valuesFile}}
+            ignoreMissingValueFiles: true
+        - repoURL: https://github.com/knkcs-fixtures/deploy.git
+          targetRevision: main
+          ref: deploy
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: fixtures
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=true

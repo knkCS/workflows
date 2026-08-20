@@ -1,0 +1,34 @@
+name: Self-test
+# Repo-local CI: this repo's reusable workflows are consumed by every other
+# repo's CI, but nothing exercised THEM on their own PRs — a broken engine
+# script would land silently and only fail in a consumer. This workflow runs
+# each engine's fixture self-test on PRs that touch it.
+#
+# tests/rendering-check/run.sh proves the argocd-rendering-check engine GREEN
+# on a correct deploy-repo fixture and RED (exit code inverted in the script)
+# on a missing value file and on a schema-breaking values typo. It is hermetic:
+# the remote chart sources are a throwaway local git repo and a localhost Helm
+# repository — no tokens, no external network beyond tool installs.
+on:
+  pull_request:
+    paths:
+      - .github/workflows/argocd-rendering-check.yml
+      - .github/workflows/self-test.yml
+      - scripts/**
+      - tests/**
+
+permissions:
+  contents: read
+
+jobs:
+  rendering-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: azure/setup-helm@v5
+      - name: Install kubeconform
+        run: bash scripts/install-kubeconform.sh
+      - name: Ensure PyYAML
+        run: python3 -c 'import yaml' 2>/dev/null || python3 -m pip install --user pyyaml
+      - name: Run rendering-check self-test
+        run: bash tests/rendering-check/run.sh

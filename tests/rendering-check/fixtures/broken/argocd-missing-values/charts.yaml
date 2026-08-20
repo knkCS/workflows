@@ -1,0 +1,42 @@
+# Broken on purpose: the production override
+# (environments/production/infrastructure/demo-local-values.yaml) does not
+# exist and ignoreMissingValueFiles is NOT set, so rendering the production
+# Application must fail naming that file. Staging's files all exist — which is
+# what lets the self-test also prove --skip-env production turns this green,
+# the knob for an environment a deploy repo declares unwired.
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: fixture-broken-missing-values
+  namespace: argocd
+spec:
+  generators:
+    - matrix:
+        generators:
+          - list:
+              elements:
+                - name: demo-local
+          - list:
+              elements:
+                - environment: staging
+                - environment: production
+  template:
+    metadata:
+      name: "fixture-{{name}}-{{environment}}"
+      namespace: argocd
+    spec:
+      project: default
+      sources:
+        - repoURL: https://github.com/knkcs-fixtures/deploy.git
+          targetRevision: main
+          path: "charts/{{name}}"
+          helm:
+            valueFiles:
+              - $deploy/base/infrastructure/{{name}}-values.yaml
+              - $deploy/environments/{{environment}}/infrastructure/{{name}}-values.yaml
+        - repoURL: https://github.com/knkcs-fixtures/deploy.git
+          targetRevision: main
+          ref: deploy
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: fixtures

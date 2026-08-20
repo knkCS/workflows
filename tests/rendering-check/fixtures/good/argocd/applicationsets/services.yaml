@@ -1,0 +1,48 @@
+# Shape 1 (knkcms/deploy services.yaml): the chart comes from a service repo's
+# git source, the values from the deploy repo via a `ref: deploy` source. The
+# self-test maps the fixture repoURL to a throwaway local git repo with git's
+# own url.insteadOf mechanism — the same mechanism CI uses to inject CI_TOKEN.
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: fixture-services
+  namespace: argocd
+spec:
+  generators:
+    - matrix:
+        generators:
+          - list:
+              elements:
+                - service: demo
+                  repoURL: https://github.com/knkcs-fixtures/demo.git
+                  chartPath: charts/demo
+          - list:
+              elements:
+                - environment: staging
+                - environment: production
+  template:
+    metadata:
+      name: "fixture-{{service}}-{{environment}}"
+      namespace: argocd
+    spec:
+      project: default
+      sources:
+        - repoURL: "{{repoURL}}"
+          targetRevision: main
+          path: "{{chartPath}}"
+          helm:
+            valueFiles:
+              - $deploy/base/services/{{service}}-values.yaml
+              - $deploy/environments/{{environment}}/services/{{service}}-values.yaml
+        - repoURL: https://github.com/knkcs-fixtures/deploy.git
+          targetRevision: main
+          ref: deploy
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: fixtures
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=true

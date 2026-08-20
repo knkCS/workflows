@@ -1,0 +1,5 @@
+# Referenced by infrastructure-charts.yaml as a plain relative valueFiles
+# entry, which ArgoCD resolves against the source's `path` (this chart
+# directory) — not the repository root. The unique image tag is what the
+# self-test greps for.
+image: nginx:relative-tag

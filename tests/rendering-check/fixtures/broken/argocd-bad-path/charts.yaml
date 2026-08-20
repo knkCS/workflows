@@ -1,0 +1,30 @@
+# Broken on purpose: the source's path names a chart directory that does not
+# exist (charts/nope) — the "bad reference" defect class. The check must fail
+# with an error naming the path, not a traceback.
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: fixture-broken-bad-path
+  namespace: argocd
+spec:
+  generators:
+    - list:
+        elements:
+          - name: nope
+            environment: staging
+  template:
+    metadata:
+      name: "fixture-bad-path-{{environment}}"
+      namespace: argocd
+    spec:
+      project: default
+      sources:
+        - repoURL: https://github.com/knkcs-fixtures/deploy.git
+          targetRevision: main
+          path: "charts/{{name}}"
+        - repoURL: https://github.com/knkcs-fixtures/deploy.git
+          targetRevision: main
+          ref: deploy
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: fixtures
