@@ -67,6 +67,9 @@ jobs:
         run: git config --global url."https://${CI_TOKEN}@github.com/".insteadOf "https://github.com/"
         env:
           CI_TOKEN: ${{ secrets.CI_TOKEN }}
+      # --kubeconform-flags uses the = form: its value starts with a dash
+      # (e.g. a bare "-strict"), which argparse would otherwise read as an
+      # unknown option instead of the value.
       - name: Render and validate
         run: |
           python3 .knkcs-workflows/scripts/argocd-rendering-check.py \
@@ -75,5 +78,5 @@ jobs:
             --argocd-dir "${{ inputs.argocd-dir }}" \
             --skip-env "${{ inputs.skip-environments }}" \
             --kubernetes-version "${{ inputs.kubernetes-version }}" \
-            --kubeconform-flags "${{ inputs.kubeconform-flags }}" \
+            --kubeconform-flags="${{ inputs.kubeconform-flags }}" \
             --output-dir "$RUNNER_TEMP/rendered"

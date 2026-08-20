@@ -92,6 +92,8 @@ if log=$(python3 "$RENDERER" \
     || fail "good: production override did not land (want replicas: 2)"
   grep -q 'fixture-message: "infra-base"' "$out/fixture-demo-infra-staging.yaml" \
     || fail "good: helm-repo chart did not read the deploy repo's values"
+  grep -q 'image: nginx:relative-tag' "$out/fixture-demo-local-staging.yaml" \
+    || fail "good: chart-relative value file did not resolve against the source's path"
   pass "good fixture renders and validates"
 else
   fail "good: expected exit 0, got $?; log: $log"
@@ -145,6 +147,25 @@ else
   echo "$log" | grep -qi "invalid" \
     || fail "broken/bad-schema: expected kubeconform to report an invalid manifest; log: $log"
   pass "schema-invalid rendered output fails the check"
+fi
+
+# 5. A source path that references a directory the repo does not have — the
+#    "bad reference" defect class — fails with an error naming the path, not a
+#    traceback. Asserted RED by inverting the exit code.
+begin
+if log=$(python3 "$RENDERER" \
+    --repo-root "$FIXTURES/broken" \
+    --repo-url https://github.com/knkcs-fixtures/deploy.git \
+    --argocd-dir argocd-bad-path \
+    --output-dir "$TMP/broken-path-out" 2>&1); then
+  fail "broken/bad-path: expected a non-zero exit, got success; log: $log"
+else
+  echo "$log" | grep -q "charts/nope' does not exist" \
+    || fail "broken/bad-path: error does not name the bad path; log: $log"
+  if echo "$log" | grep -q "Traceback"; then
+    fail "broken/bad-path: died with a traceback instead of a named error; log: $log"
+  fi
+  pass "a bad source path fails the check, naming the path"
 fi
 
 # --- verdict ----------------------------------------------------------------

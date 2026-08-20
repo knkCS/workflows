@@ -31,8 +31,9 @@ Placeholders that survive substitution fail for the same reason.
 Applications whose `environment` generator parameter is in --skip-env are
 skipped — that is the knob for environments a deploy repo declares unwired.
 
-Exit codes: 0 all rendered and validated; 1 render or validation failures;
-2 usage or environment problems (missing tools, unreadable input).
+Exit codes: 0 all rendered and validated; 1 render or validation failures
+(bad references, missing value files, invalid YAML, invalid manifests);
+2 usage or environment problems (missing tools, missing --repo-root/argocd-dir).
 """
 
 import argparse
@@ -164,7 +165,7 @@ class Renderer:
         print(f"ERROR: {msg}", file=sys.stderr, flush=True)
         gha_error(msg)
 
-    def run(self, cmd, **kw):
+    def run_cmd(self, cmd, **kw):
         return subprocess.run(cmd, capture_output=True, text=True, **kw)
 
     def resolve_repo(self, url, revision, why):
@@ -180,9 +181,9 @@ class Renderer:
         os.makedirs(os.path.dirname(dst), exist_ok=True)
         log(f"  clone {url} @ {revision} ({why})")
         if revision in ("", "HEAD", None):
-            proc = self.run(["git", "clone", "--quiet", "--depth", "1", url, dst])
+            proc = self.run_cmd(["git", "clone", "--quiet", "--depth", "1", url, dst])
         else:
-            proc = self.run(
+            proc = self.run_cmd(
                 ["git", "clone", "--quiet", "--depth", "1", "--branch", str(revision), url, dst]
             )
             if proc.returncode != 0 and re.fullmatch(r"[0-9a-f]{7,40}", str(revision)):
@@ -194,7 +195,7 @@ class Renderer:
                     ["git", "-C", dst, "fetch", "--quiet", "--depth", "1", "origin", str(revision)],
                     ["git", "-C", dst, "checkout", "--quiet", "FETCH_HEAD"],
                 ):
-                    proc = self.run(cmd)
+                    proc = self.run_cmd(cmd)
                     if proc.returncode != 0:
                         break
         if proc.returncode != 0:
@@ -222,7 +223,7 @@ class Renderer:
             oci = f"oci://{repo_url.rstrip('/')}/{chart}"
             cmd = ["helm", "pull", oci, "--version", str(version), "--untar", "--untardir", dst]
             log(f"  pull {oci} {version}")
-        proc = self.run(cmd)
+        proc = self.run_cmd(cmd)
         if proc.returncode != 0:
             raise RenderError(
                 f"helm pull failed for chart '{chart}' {version} from {repo_url}: "
@@ -238,18 +239,23 @@ class Renderer:
         self.chart_cache[key] = chart_dir
         return chart_dir
 
+    def ensure_within(self, root, path, what):
+        root = os.path.realpath(root)
+        if path != root and not path.startswith(root + os.sep):
+            raise RenderError(f"{what} escapes its repository")
+        return path
+
     def contained_path(self, root, rel, what):
         p = os.path.realpath(os.path.join(root, rel))
-        root = os.path.realpath(root)
-        if p != root and not p.startswith(root + os.sep):
-            raise RenderError(f"{what} '{rel}' escapes its repository")
-        return p
+        return self.ensure_within(root, p, f"{what} '{rel}'")
 
     # -- value files --------------------------------------------------------
 
     def resolve_value_files(self, app_name, helm_cfg, refs, chart_repo_dir, chart_dir):
         """valueFiles entries -> local paths. $ref/... resolves through the named
-        ref source's repo; plain relative paths resolve against the chart."""
+        ref source's repo; a plain relative path resolves against the source's
+        `path` (the chart directory), as ArgoCD resolves it — `..` may climb
+        within the source's repo but never out of it."""
         files = []
         ignore_missing = bool(helm_cfg.get("ignoreMissingValueFiles"))
         for vf in helm_cfg.get("valueFiles", []) or []:
@@ -267,8 +273,9 @@ class Renderer:
                 )
                 path = self.contained_path(repo_dir, rel, f"{app_name}: value file")
             else:
-                base = chart_dir if chart_repo_dir is None else chart_repo_dir
-                path = self.contained_path(base, vf, f"{app_name}: value file")
+                containment = chart_dir if chart_repo_dir is None else chart_repo_dir
+                path = os.path.realpath(os.path.join(chart_dir, vf))
+                self.ensure_within(containment, path, f"{app_name}: value file '{vf}'")
             if not os.path.isfile(path):
                 shown = vf if vf.startswith("$") else os.path.relpath(path, self.repo_root)
                 if ignore_missing:
@@ -306,6 +313,11 @@ class Renderer:
                 )
                 chart_dir = self.contained_path(repo_dir, src["path"], f"{app_name}: path")
                 chart_repo_dir = repo_dir
+                if not os.path.isdir(chart_dir):
+                    raise RenderError(
+                        f"{app_name}: path '{src['path']}' does not exist in "
+                        f"{src.get('repoURL', '')} @ {src.get('targetRevision', 'HEAD')}"
+                    )
                 has_chart = os.path.isfile(os.path.join(chart_dir, "Chart.yaml"))
                 if not has_chart:
                     if "helm" in src:
@@ -340,9 +352,9 @@ class Renderer:
         with open(os.path.join(chart_dir, "Chart.yaml")) as f:
             chart_meta = yaml.safe_load(f) or {}
         if chart_meta.get("dependencies") and not os.path.isdir(os.path.join(chart_dir, "charts")):
-            proc = self.run(["helm", "dependency", "build", chart_dir])
+            proc = self.run_cmd(["helm", "dependency", "build", chart_dir])
             if proc.returncode != 0:
-                proc = self.run(["helm", "dependency", "update", chart_dir])
+                proc = self.run_cmd(["helm", "dependency", "update", chart_dir])
                 if proc.returncode != 0:
                     raise RenderError(
                         f"{app_name}: helm dependency build failed: {proc.stderr.strip()}"
@@ -366,7 +378,7 @@ class Renderer:
         for p in helm_cfg.get("parameters", []) or []:
             flag = "--set-string" if p.get("forceString") else "--set"
             cmd += [flag, f"{p.get('name')}={p.get('value')}"]
-        proc = self.run(cmd)
+        proc = self.run_cmd(cmd)
         if proc.returncode != 0:
             raise RenderError(
                 f"{app_name}: helm template failed:\n{proc.stderr.strip()}"

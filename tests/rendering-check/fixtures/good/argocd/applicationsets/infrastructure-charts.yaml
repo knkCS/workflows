@@ -28,6 +28,9 @@ spec:
           path: "charts/{{name}}"
           helm:
             valueFiles:
+              # A plain (non-$ref) entry resolves relative to the source's
+              # `path` — the chart directory — exactly as ArgoCD resolves it.
+              - relative-values.yaml
               - $deploy/base/infrastructure/{{name}}-values.yaml
               - $deploy/environments/{{environment}}/infrastructure/{{name}}-values.yaml
         - repoURL: https://github.com/knkcs-fixtures/deploy.git
