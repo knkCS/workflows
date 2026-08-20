@@ -1,0 +1,79 @@
+name: ArgoCD rendering check
+# Renders every ArgoCD Application the caller's ApplicationSets generate, with
+# the caller's real value files, and schema-validates the rendered manifests
+# with kubeconform. For deploy repos (knkcms/deploy is the canonical layout):
+# call it on every PR and a values typo, a missing value file, or a manifest
+# that no longer matches the Kubernetes schema fails the check before ArgoCD
+# ever sees the commit.
+#
+# The engine is scripts/argocd-rendering-check.py in THIS repo — its module
+# comment documents the three source shapes rendered (service-repo git charts,
+# upstream Helm/OCI charts, in-repo charts) and the semantics (sources naming
+# the caller's repo resolve to the PR checkout; `ref:` sources anchor value
+# files; directory sources are collected into the validation set). The
+# self-test for both green and red behavior is tests/rendering-check/run.sh.
+#
+# A thin caller:
+#
+#   jobs:
+#     rendering-check:
+#       uses: knkcs/workflows/.github/workflows/argocd-rendering-check.yml@v1
+#       secrets:
+#         CI_TOKEN: ${{ secrets.CI_TOKEN }}
+#
+# with `skip-environments: production` (for example) while an environment is
+# declared unwired, and `argocd-dir` if the manifests live somewhere other
+# than argocd/.
+on:
+  workflow_call:
+    inputs:
+      argocd-dir:          { type: string, default: argocd }        # scanned recursively for Application/ApplicationSet docs
+      skip-environments:   { type: string, default: "" }            # comma/space-separated `environment` params to skip (unwired envs)
+      kubernetes-version:  { type: string, default: "1.31.0" }      # helm --kube-version and kubeconform -kubernetes-version
+      kubeconform-flags:   { type: string, default: "-strict -ignore-missing-schemas" }
+      kubeconform-version: { type: string, default: "0.6.7" }
+    secrets:
+      CI_TOKEN: { required: true }  # read access to the private service repos whose charts the ApplicationSets pull
+
+permissions:
+  contents: read
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    steps:
+      # Two checkouts: the caller's repo is the tree under test; this repo
+      # carries the renderer. `github.job_workflow_sha` is the commit this
+      # reusable workflow file was resolved from, so script and workflow can
+      # never skew — whatever ref the caller pinned. The fallback ref exists
+      # only for contexts that leave the SHA empty.
+      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6
+        with:
+          repository: knkcs/workflows
+          ref: ${{ github.job_workflow_sha || 'v1' }}
+          path: .knkcs-workflows
+      - uses: azure/setup-helm@v5
+      - name: Install kubeconform
+        run: bash .knkcs-workflows/scripts/install-kubeconform.sh "${{ inputs.kubeconform-version }}"
+      - name: Ensure PyYAML
+        run: python3 -c 'import yaml' 2>/dev/null || python3 -m pip install --user pyyaml
+      # The service repos the ApplicationSets pull charts from are private, so
+      # every clone the renderer makes needs the token. Injected with git's own
+      # url.insteadOf (configure-private-modules' mechanism), via `env:` rather
+      # than ${{ }} interpolation so the secret is not pasted into the rendered
+      # script (publish-ui.yml's NODE_AUTH_TOKEN pattern).
+      - name: Authenticate git to GitHub
+        run: git config --global url."https://${CI_TOKEN}@github.com/".insteadOf "https://github.com/"
+        env:
+          CI_TOKEN: ${{ secrets.CI_TOKEN }}
+      - name: Render and validate
+        run: |
+          python3 .knkcs-workflows/scripts/argocd-rendering-check.py \
+            --repo-root . \
+            --repo-url "https://github.com/${{ github.repository }}.git" \
+            --argocd-dir "${{ inputs.argocd-dir }}" \
+            --skip-env "${{ inputs.skip-environments }}" \
+            --kubernetes-version "${{ inputs.kubernetes-version }}" \
+            --kubeconform-flags "${{ inputs.kubeconform-flags }}" \
+            --output-dir "$RUNNER_TEMP/rendered"
