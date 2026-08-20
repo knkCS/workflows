@@ -1,0 +1,36 @@
+# Broken on purpose: bad-schema-values.yaml sets `replicas: "three"`, which
+# helm happily templates into the Deployment — the defect only exists in the
+# RENDERED manifest, which is exactly what kubeconform must catch (spec.replicas
+# wants an integer). Proves schema validation covers the rendered output rather
+# than just the source YAML.
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: fixture-broken-bad-schema
+  namespace: argocd
+spec:
+  generators:
+    - list:
+        elements:
+          - name: demo-local
+            valuesFile: bad-schema-values.yaml
+            environment: staging
+  template:
+    metadata:
+      name: "fixture-bad-schema-{{environment}}"
+      namespace: argocd
+    spec:
+      project: default
+      sources:
+        - repoURL: https://github.com/knkcs-fixtures/deploy.git
+          targetRevision: main
+          path: "charts/{{name}}"
+          helm:
+            valueFiles:
+              - $deploy/base/infrastructure/{{valuesFile}}
+        - repoURL: https://github.com/knkcs-fixtures/deploy.git
+          targetRevision: main
+          ref: deploy
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: fixtures

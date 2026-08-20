@@ -1,0 +1,44 @@
+# Shape 3 (knkcms/deploy infrastructure-charts.yaml): a chart held in the
+# deploy repo itself under charts/, values from the same repo.
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: fixture-infrastructure-charts
+  namespace: argocd
+spec:
+  generators:
+    - matrix:
+        generators:
+          - list:
+              elements:
+                - name: demo-local
+          - list:
+              elements:
+                - environment: staging
+                - environment: production
+  template:
+    metadata:
+      name: "fixture-{{name}}-{{environment}}"
+      namespace: argocd
+    spec:
+      project: default
+      sources:
+        - repoURL: https://github.com/knkcs-fixtures/deploy.git
+          targetRevision: main
+          path: "charts/{{name}}"
+          helm:
+            valueFiles:
+              - $deploy/base/infrastructure/{{name}}-values.yaml
+              - $deploy/environments/{{environment}}/infrastructure/{{name}}-values.yaml
+        - repoURL: https://github.com/knkcs-fixtures/deploy.git
+          targetRevision: main
+          ref: deploy
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: fixtures
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=true

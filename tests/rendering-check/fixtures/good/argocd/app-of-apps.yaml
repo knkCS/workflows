@@ -1,0 +1,22 @@
+# The app-of-apps root (a directory source). It renders no Helm chart; the
+# checker collects the files it syncs into the schema-validation set instead.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: fixture-root
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/knkcs-fixtures/deploy.git
+    targetRevision: main
+    path: argocd/applicationsets
+    directory:
+      recurse: false
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true

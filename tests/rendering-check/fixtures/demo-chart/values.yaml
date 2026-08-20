@@ -1,0 +1,5 @@
+# `message` has NO default on purpose: the deployment template wraps it in
+# `required`, so a render that fails to feed the declared value files through
+# fails loudly instead of rendering chart defaults and passing anyway.
+replicas: 1
+image: nginx:1.27

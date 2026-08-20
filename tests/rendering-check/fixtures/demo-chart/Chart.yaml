@@ -1,0 +1,6 @@
+apiVersion: v2
+name: demo
+description: Minimal chart for the rendering-check fixtures. The self-test serves it from a throwaway git repo (the service-repo chart shape) and from a localhost Helm repository (the upstream-chart shape).
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
