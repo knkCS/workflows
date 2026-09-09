@@ -16,7 +16,7 @@ via `secrets:` / `secrets: inherit` at call time.
 | `commitlint.yml` | Conventional-commit linting |
 | `release-please.yml` | release-please PR + release automation |
 | `publish-image-chart.yml` | Build+push image and Helm chart to GHCR |
-| `publish-ui.yml` | Publish a UI npm package to GitHub Packages |
+| `publish-ui.yml` | Publish a UI npm package to a configurable registry (public npm or GitHub Packages) |
 | `argocd-rendering-check.yml` | Render a deploy repo's ArgoCD Applications with their real value files and schema-validate the output |
 
 `self-test.yml` is not reusable: it is this repo's own CI, running each engine

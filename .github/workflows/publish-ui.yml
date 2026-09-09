@@ -1,3 +1,26 @@
+# Publish an npm workspace package to a configurable npm registry.
+#
+# Defaults reproduce the original public-npm behavior exactly: registry
+# https://registry.npmjs.org, `npm publish --access public`, auth via the
+# NPM_TOKEN secret. Callers that pass NPM_TOKEN (directly or via
+# `secrets: inherit`) and no new inputs are unaffected.
+#
+# To publish to GitHub Packages instead:
+#   - set `registry-url: https://npm.pkg.github.com`
+#   - grant the calling workflow (or job) `packages: write`
+#   - pass no NPM_TOKEN: without the secret, auth falls back to the workflow's
+#     own GitHub token, which a reusable workflow receives without any secret
+#     being passed
+#   - scope caveat: setup-node maps the calling repo's OWNER scope to the
+#     GitHub Packages registry, so the package must be scoped @<owner> (a
+#     package scoped otherwise needs its own publishConfig)
+# `--access public` is sent to every registry except GitHub Packages, where
+# package visibility is governed by org/repo settings, not the flag.
+#
+# Note: this workflow requests `packages: write`, and a called workflow may
+# not request more than its caller allows — so a caller that restricts
+# GITHUB_TOKEN permissions must grant `packages: write` even when publishing
+# to public npm.
 name: Publish UI package
 on:
   workflow_call:
@@ -8,21 +31,38 @@ on:
       build-script:  { type: string, default: "build:ui" }
       test-script:   { type: string, default: "test:ui" }
       node-ci-flags: { type: string, default: "" }
+      registry-url:  { type: string, default: "https://registry.npmjs.org" }  # e.g. https://npm.pkg.github.com
     secrets:
-      NPM_TOKEN: { required: true }
+      # Auth for `npm publish`. Optional: when absent, the workflow's GitHub
+      # token is used — sufficient for GitHub Packages, never for public npm.
+      NPM_TOKEN: { required: false }
 
 permissions:
   contents: read
+  packages: write
 
 jobs:
   publish:
     runs-on: ubuntu-latest
+    env:
+      # The secrets context is not allowed in a step-level `if`; hoist the
+      # presence test here, where it is.
+      NPM_TOKEN_SET: ${{ secrets.NPM_TOKEN != '' }}
     steps:
+      # Fail fast on a tokenless publish to anywhere but GitHub Packages:
+      # github.token is useless off GitHub and would otherwise be sent to the
+      # registry only to fail with a late 401. Skipped whenever NPM_TOKEN is
+      # passed, so existing callers never see it run.
+      - name: Refuse tokenless publish outside GitHub Packages
+        if: ${{ !contains(inputs.registry-url, 'npm.pkg.github.com') && env.NPM_TOKEN_SET == 'false' }}
+        run: |
+          echo "::error::NPM_TOKEN is required when registry-url is not GitHub Packages"
+          exit 1
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-          registry-url: https://registry.npmjs.org
+          registry-url: ${{ inputs.registry-url }}
           cache: npm
           cache-dependency-path: package-lock.json
       - run: npm ci ${{ inputs.node-ci-flags }}
@@ -42,6 +82,11 @@ jobs:
         run: npm run ${{ inputs.test-script }}
       - name: Publish
         working-directory: ${{ inputs.package-dir }}
-        run: npm publish --access public
+        # GitHub Packages must not be sent `--access public` (access is decided
+        # by org/repo settings there); every other registry keeps today's flag.
+        # `cond && flag || ''` (not `cond && '' || flag`): an empty-string
+        # middle operand is falsy and would make the expression always yield
+        # the flag.
+        run: npm publish ${{ !contains(inputs.registry-url, 'npm.pkg.github.com') && '--access public' || '' }}
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN || github.token }}
