@@ -2,7 +2,7 @@
 #
 # Change-area classifier: which change areas a pull request touches.
 #
-#   change-areas.sh [--docs-exclude PATTERNS] < changed-paths
+#   change-areas.sh [--docs-exclude PATTERNS] [--go-dir DIR]... [--ui-dir DIR]... < changed-paths
 #
 # Reads repo-relative file paths, one per line, on stdin and prints one line
 # per change area, in a fixed order, ready to append to $GITHUB_OUTPUT:
@@ -16,6 +16,16 @@
 # against the whole path (`*` crosses `/`, so `design/*` covers everything
 # below design/). A path matching one is never docs — it is classified by the
 # remaining rules as if it were not Markdown.
+#
+# --go-dir and --ui-dir (repeatable) give the caller's own layout a home: every
+# path under DIR/ is Go, or UI, as if it matched that area's patterns below.
+# go-service-ci passes its `working-directory` and `helm-chart` as Go dirs (the
+# `go` job vets, tests and helm-lints them) and its `ui-package` as a UI dir, so
+# a module in go/, a chart in charts/<name>/ or a UI package outside packages/
+# stops counting as every area. DIR is literal (no globs); a leading ./ and a
+# trailing / are dropped; an empty DIR or `.` is ignored, since the repo root
+# would claim every path. A dir only ever ADDS a home — docs, image and *.go
+# still win inside it, and a path claimed by both Go and UI is every area.
 #
 # go-service-ci's `changes` job calls this; tests/change-areas/run.sh is its
 # fixture self-test. The rules (knkCS/workflows#21):
@@ -33,8 +43,9 @@
 #          and UI: a Go job regenerates it, so a hand-edit must reach one.
 #
 # The conservative rule is the point of the whole design: a path that matches
-# NO area — a Makefile, a workflow, a chart, a Markdown fixture, anything under
-# .claude/ — turns on EVERY area, and so does a path matching both Go and UI
+# NO area — a Makefile, a workflow, a chart not given as --go-dir, a Markdown
+# fixture, anything under .claude/ — turns on EVERY area, and so does a path
+# matching both Go and UI
 # (e.g. packages/foo/go.mod). An empty list also means every area: nothing to
 # classify is not evidence that nothing needs checking. So the only way this
 # script can be wrong is by running too much, never too little.
@@ -44,10 +55,28 @@ set -euo pipefail
 set -f # the patterns below and in --docs-exclude are globs for `case`, never for the filesystem
 
 docs_exclude=""
+go_dirs="" ui_dirs="" # newline-separated, normalised
+
+# normalise_dir DIR: drop leading ./ and trailing /; print nothing for the root.
+normalise_dir() {
+  local d=$1
+  while case $d in ./*) true ;; *) false ;; esac; do d=${d#./}; done
+  while case $d in */) true ;; *) false ;; esac; do d=${d%/}; done
+  case $d in ''|.) return 0 ;; esac
+  printf '%s\n' "$d"
+}
+
 while [ $# -gt 0 ]; do
   case $1 in
     --docs-exclude) docs_exclude=${2-}; shift 2 || { echo "change-areas: --docs-exclude needs a value" >&2; exit 2; } ;;
     --docs-exclude=*) docs_exclude=${1#--docs-exclude=}; shift ;;
+    --go-dir|--ui-dir)
+      [ $# -ge 2 ] || { echo "change-areas: $1 needs a value" >&2; exit 2; }
+      d=$(normalise_dir "$2")
+      if [ -n "$d" ]; then
+        if [ "$1" = --go-dir ]; then go_dirs="$go_dirs$d"$'\n'; else ui_dirs="$ui_dirs$d"$'\n'; fi
+      fi
+      shift 2 ;;
     *) echo "change-areas: unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -89,7 +118,18 @@ is_image() {
   return 1
 }
 
+# under_dir PATH DIRS: PATH lies below one of the newline-separated DIRS.
+under_dir() {
+  local d
+  while IFS= read -r d; do
+    [ -n "$d" ] || continue
+    case $1 in "$d"/*) return 0 ;; esac
+  done <<<"$2"
+  return 1
+}
+
 is_go() {
+  if under_dir "$1" "$go_dirs"; then return 0; fi
   case $1 in
     *.go|go.mod|go.sum|go.work|go.work.sum|*/go.mod|*/go.sum|*/go.work|*/go.work.sum) return 0 ;;
     *.proto|api/*|buf.yaml|buf.gen.yaml|buf.work.yaml|.golangci.yml|.golangci.yaml|migrations/*) return 0 ;;
@@ -98,6 +138,7 @@ is_go() {
 }
 
 is_ui() {
+  if under_dir "$1" "$ui_dirs"; then return 0; fi
   case $1 in
     web/*|packages/*|package.json|package-lock.json|.npmrc) return 0 ;;
   esac
@@ -108,6 +149,11 @@ is_generated_ui() {
   case $1 in
     packages/*/src/gen/*|web/src/gen/*) return 0 ;;
   esac
+  local d
+  while IFS= read -r d; do
+    [ -n "$d" ] || continue
+    case $1 in "$d"/src/gen/*) return 0 ;; esac
+  done <<<"$ui_dirs"
   return 1
 }
 
