@@ -27,6 +27,7 @@ permissions:
 jobs:
   release-please:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       releases_created: ${{ steps.rp.outputs.releases_created }}
       paths_released:   ${{ steps.rp.outputs.paths_released }}

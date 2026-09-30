@@ -1,19 +1,28 @@
 name: Self-test
 # Repo-local CI: this repo's reusable workflows are consumed by every other
 # repo's CI, but nothing exercised THEM on their own PRs — a broken engine
-# script would land silently and only fail in a consumer. This workflow runs
-# each engine's fixture self-test on PRs that touch it.
+# script or workflow would land silently and only fail in a caller. This
+# workflow runs on PRs that touch a workflow, a script or a test:
 #
-# tests/rendering-check/run.sh proves the argocd-rendering-check engine GREEN
-# on a correct deploy-repo fixture and RED (exit code inverted in the script)
-# on a missing value file and on a schema-breaking values typo. It is hermetic:
-# the remote chart sources are a throwaway local git repo and a localhost Helm
-# repository — no tokens, no external network beyond tool installs.
+# - `actionlint` lints every workflow in .github/workflows/ (expressions, input
+#   types, runner labels, and — via the runner's shellcheck — `run:` scripts).
+# - `workflow-timeouts` (tests/workflow-timeouts/run.sh) proves every job
+#   declares `timeout-minutes` with the agreed defaults, so no job can run to
+#   GitHub's 6-hour limit again.
+# - `rendering-check` (tests/rendering-check/run.sh) proves the
+#   argocd-rendering-check engine GREEN on a correct deploy-repo fixture and RED
+#   (exit code inverted in the script) on a missing value file and on a
+#   schema-breaking values typo. It is hermetic: the remote chart sources are a
+#   throwaway local git repo and a localhost Helm repository — no tokens, no
+#   external network beyond tool installs.
+#
+# Every job runs on every matching PR: the checks are cheap, and a path filter
+# per job would be one more place for a real check to be skipped.
 on:
   pull_request:
     paths:
-      - .github/workflows/argocd-rendering-check.yml
-      - .github/workflows/self-test.yml
+      - .github/workflows/**
+      - .github/actionlint.yaml
       - scripts/**
       - tests/**
 
@@ -21,8 +30,34 @@ permissions:
   contents: read
 
 jobs:
+  actionlint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      ACTIONLINT_VERSION: 1.7.12
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install actionlint
+        run: |
+          curl -sSfL -o "$RUNNER_TEMP/actionlint.tgz" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          tar -xzf "$RUNNER_TEMP/actionlint.tgz" -C "$RUNNER_TEMP" actionlint
+      - name: Lint workflows
+        run: '"$RUNNER_TEMP/actionlint" -color'
+
+  workflow-timeouts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - name: Ensure PyYAML
+        run: python3 -c 'import yaml' 2>/dev/null || python3 -m pip install --user pyyaml
+      - name: Check every job declares its timeout
+        run: bash tests/workflow-timeouts/run.sh
+
   rendering-check:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
       - uses: azure/setup-helm@v5

@@ -15,6 +15,12 @@ on:
       npm-github-packages: { type: boolean, default: false }          # write CI_TOKEN into ~/.npmrc so `npm ci` can reach npm.pkg.github.com
       check-ent-drift:     { type: boolean, default: true }
       check-gofmt:         { type: boolean, default: false }          # fail on a tracked Go file that is not gofmt-clean
+      # Job timeouts, so a hang costs minutes rather than GitHub's 6-hour limit.
+      # The test jobs' 40 sits above the 30m `test-timeout` default, so go test's
+      # own timeout (with its stack dump) fires first; raise both together.
+      # `backend` and `helm` are fixed at 10.
+      test-timeout-minutes: { type: number, default: 40 }
+      ui-timeout-minutes:   { type: number, default: 15 }
     secrets:
       CI_TOKEN: { required: true }
 
@@ -24,6 +30,7 @@ permissions:
 jobs:
   backend:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       # ui-lint and ui-test run in the `ui` job, which exists only when
       # `ui-package` is set — so on their own they would be silently ignored, and
@@ -93,7 +100,7 @@ jobs:
           fi
           if [ -n "$unformatted" ]; then
             echo "::error::gofmt: these tracked files are not formatted"
-            echo "$unformatted" | sed 's/^/  /'
+            while IFS= read -r f; do echo "  $f"; done <<<"$unformatted"
             printf 'fix with: gofmt -w %s\n' "$(echo "$unformatted" | tr '\n' ' ')"
             exit 1
           fi
@@ -103,6 +110,7 @@ jobs:
   test-testcontainers:
     if: ${{ inputs.test-mode == 'testcontainers' }}
     runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.test-timeout-minutes }}
     steps:
       - uses: actions/checkout@v6
       - uses: knkcs/workflows/actions/configure-private-modules@v1
@@ -126,6 +134,7 @@ jobs:
   test-services:
     if: ${{ inputs.test-mode == 'services' }}
     runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.test-timeout-minutes }}
     services:
       postgres:
         image: postgres:16-alpine
@@ -163,6 +172,7 @@ jobs:
   ui:
     if: ${{ inputs.ui-package != '' }}
     runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.ui-timeout-minutes }}
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v4
@@ -235,6 +245,7 @@ jobs:
   helm:
     if: ${{ inputs.helm-chart != '' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
       - uses: azure/setup-helm@v5

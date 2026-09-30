@@ -32,6 +32,7 @@ on:
       test-script:   { type: string, default: "test:ui" }
       node-ci-flags: { type: string, default: "" }
       registry-url:  { type: string, default: "https://registry.npmjs.org" }  # e.g. https://npm.pkg.github.com
+      ui-timeout-minutes: { type: number, default: 15 }  # job timeout: install, build, test and publish
     secrets:
       # Auth for `npm publish`. Optional: when absent, the workflow's GitHub
       # token is used — sufficient for GitHub Packages, never for public npm.
@@ -44,6 +45,7 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.ui-timeout-minutes }}
     env:
       # The secrets context is not allowed in a step-level `if`; hoist the
       # presence test here, where it is.
