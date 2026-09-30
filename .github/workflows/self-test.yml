@@ -20,13 +20,16 @@ name: Self-test
 #   conservative one, a file in no known area turns on every area — and the
 #   suite verdict behind its `ci-ok` job (green on pass/skipped, red on
 #   failure/cancelled).
-# - `docs-only-suite` calls go-service-ci from THIS commit (local path) with a
-#   docs-only change set, and `docs-only-suite-check` reads the run's job list
-#   back to prove that such a PR runs `changes` and `ci-ok` only, both green,
-#   with every other job skipped. The change set comes from go-service-ci's
-#   test-only `test-changed-files` input, since this PR's own files are not
-#   docs-only. `ui-package` and `helm-chart` are set to paths that do not
-#   exist, so a wrongly-run `ui` or `helm` job would fail rather than pass.
+# - `docs-only-suite`, `go-only-suite`, `services-suite` and `ui-only-suite`
+#   call go-service-ci from THIS commit (local path), each with a fixed change
+#   set from its test-only `test-changed-files` input, and `suites-check` reads
+#   the run's job list back to prove each ran exactly what its change areas
+#   need: docs-only runs neither `go` nor `ui`, Go-only runs `go` alone (in
+#   both test modes), UI-only runs `ui` alone — and `changes` and `ci-ok` are
+#   green in every one. The jobs that do run are real: the Go fixtures under
+#   tests/go-service-ci/ are modules in subdirectories (`working-directory`),
+#   one of whose tests needs the `services` containers, and the UI fixture is
+#   a workspace of the root package.json.
 #
 # Every job runs on every matching PR: the checks are cheap, and a path filter
 # per job would be one more place for a real check to be skipped.
@@ -37,6 +40,8 @@ on:
       - .github/actionlint.yaml
       - scripts/**
       - tests/**
+      - package.json
+      - package-lock.json
 
 permissions:
   contents: read
@@ -88,6 +93,14 @@ jobs:
       - name: Run change-area classifier and suite verdict self-test
         run: bash tests/change-areas/run.sh
 
+  # The PR suite end to end: go-service-ci called from THIS commit (local
+  # path) with four fixed change sets (its test-only `test-changed-files`
+  # input, since this PR's own files are none of them), and `suites-check`
+  # reading the run's job list back to prove which jobs ran and which were
+  # skipped. The fixtures under tests/go-service-ci/ make every job that SHOULD
+  # run a real one: a Go module in a subdirectory (so `working-directory` is
+  # exercised), a Go module whose test needs the `services` containers, and a
+  # UI workspace hanging from the root package.json.
   docs-only-suite:
     uses: ./.github/workflows/go-service-ci.yml
     with:
@@ -97,32 +110,112 @@ jobs:
         docs/adr/0004-example.md
         .scratch/notes.txt
         .release-please-manifest.json
+      # Paths that do not exist, so a wrongly-run job fails as well as being
+      # caught by suites-check.
       ui-package: packages/does-not-exist
       helm-chart: charts/does-not-exist
+      working-directory: does-not-exist
     secrets:
       CI_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # never used: no job that reads it may run
 
-  docs-only-suite-check:
-    needs: docs-only-suite
+  # Go-only, testcontainers mode (no service containers — their images resolve
+  # to empty, which the runner skips). The change set leans on the caller's
+  # layout: the module's testdata and the chart are Go only because they sit
+  # under `working-directory` and `helm-chart`. `ui-package` is the real
+  # fixture, so the `ui` job WOULD pass if it wrongly ran; suites-check is what
+  # catches that.
+  go-only-suite:
+    uses: ./.github/workflows/go-service-ci.yml
+    with:
+      test-changed-files: |
+        internal/service/service.go
+        go.sum
+        api/v1/service.proto
+        tests/go-service-ci/go-module/testdata/case.json
+        tests/rendering-check/fixtures/demo-chart/values.yaml
+      go-version-file: tests/go-service-ci/go-module/go.mod
+      working-directory: tests/go-service-ci/go-module
+      helm-chart: tests/rendering-check/fixtures/demo-chart
+      check-ent-drift: false
+      check-gofmt: true
+      embed-frontend: true
+      ui-package: tests/go-service-ci/ui-package
+    secrets:
+      CI_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # read access to this public repo is all the Go job needs
+
+  # Go-only again, in `services` mode: the fixture's one test fails unless
+  # Postgres and Redis are listening, so a green `go` job proves the service
+  # containers started.
+  services-suite:
+    uses: ./.github/workflows/go-service-ci.yml
+    with:
+      test-changed-files: |
+        internal/store/store.go
+      test-mode: services
+      go-version-file: tests/go-service-ci/go-services-module/go.mod
+      working-directory: tests/go-service-ci/go-services-module
+      check-ent-drift: false
+    secrets:
+      CI_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # UI-only, with every UI gate on. The UI package is outside packages/, so
+  # its source file is UI only because it is the caller's `ui-package`.
+  # `working-directory` is the real Go fixture, so the `go` job WOULD pass if
+  # it wrongly ran; suites-check is what catches that.
+  ui-only-suite:
+    uses: ./.github/workflows/go-service-ci.yml
+    with:
+      test-changed-files: |
+        packages/app-ui/src/App.tsx
+        package-lock.json
+        tests/go-service-ci/ui-package/src/index.ts
+      ui-package: tests/go-service-ci/ui-package
+      ui-lint: true
+      ui-test: true
+      go-version-file: tests/go-service-ci/go-module/go.mod
+      working-directory: tests/go-service-ci/go-module
+      check-ent-drift: false
+    secrets:
+      CI_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # never used: npm-github-packages is off and the Go job must not run
+
+  suites-check:
+    needs: [docs-only-suite, go-only-suite, services-suite, ui-only-suite]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       actions: read
     steps:
-      - name: Only changes and ci-ok ran, and both passed
+      - name: Each change set ran exactly the jobs its change areas need
         env:
           GH_TOKEN: ${{ github.token }}
           JOBS_URL: repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}/jobs
         run: |
           set -euo pipefail
-          jobs=$(gh api --paginate "$JOBS_URL" \
-            --jq '.jobs[] | select(.name | startswith("docs-only-suite / ")) | "\(.name | ltrimstr("docs-only-suite / "))=\(.conclusion)"' | sort)
-          printf '%s\n' "$jobs"
-          want=$(printf '%s\n' backend=skipped changes=success ci-ok=success helm=skipped \
-            test-services=skipped test-testcontainers=skipped ui=skipped | sort)
+          jobs=$(gh api --paginate "$JOBS_URL" --jq '.jobs[] | select(.name | test("-suite / ")) | "\(.name)=\(.conclusion)"' | sort)
+          printf '%s\n\n' "$jobs"
+          # One line per job, "<suite> / <job>=<conclusion>". Every suite must
+          # run `changes` and `ci-ok`, both green; the rest is per change set.
+          want=$(printf '%s\n' \
+            'docs-only-suite / changes=success' \
+            'docs-only-suite / go=skipped' \
+            'docs-only-suite / ui=skipped' \
+            'docs-only-suite / ci-ok=success' \
+            'go-only-suite / changes=success' \
+            'go-only-suite / go=success' \
+            'go-only-suite / ui=skipped' \
+            'go-only-suite / ci-ok=success' \
+            'services-suite / changes=success' \
+            'services-suite / go=success' \
+            'services-suite / ui=skipped' \
+            'services-suite / ci-ok=success' \
+            'ui-only-suite / changes=success' \
+            'ui-only-suite / go=skipped' \
+            'ui-only-suite / ui=success' \
+            'ui-only-suite / ci-ok=success' | sort)
           if [ "$jobs" != "$want" ]; then
-            echo "::error::a docs-only change set must run changes and ci-ok only; want:"
-            printf '%s\n' "$want"
+            echo "::error::a change set ran the wrong jobs; want:"
+            printf '%s\n\n' "$want"
+            diff <(printf '%s\n' "$want") <(printf '%s\n' "$jobs") || true
             exit 1
           fi

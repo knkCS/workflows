@@ -1,0 +1,8 @@
+{
+  "name": "knkcs-workflows-selftest",
+  "private": true,
+  "description": "Not a package. Only self-test.yml's UI suite uses this: go-service-ci's ui job runs `npm ci` at the repo root, so its fixture workspace needs a root to hang from.",
+  "workspaces": [
+    "tests/go-service-ci/ui-package"
+  ]
+}

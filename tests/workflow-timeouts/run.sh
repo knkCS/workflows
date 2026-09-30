@@ -31,11 +31,8 @@ wf_dir = pathlib.Path(sys.argv[1])
 # (workflow, job) -> (default minutes, overriding input or None when fixed)
 EXPECTED = {
     ("go-service-ci.yml", "changes"):              (10, None),
-    ("go-service-ci.yml", "backend"):              (10, None),
-    ("go-service-ci.yml", "test-testcontainers"):  (40, "test-timeout-minutes"),
-    ("go-service-ci.yml", "test-services"):        (40, "test-timeout-minutes"),
+    ("go-service-ci.yml", "go"):                   (40, "test-timeout-minutes"),
     ("go-service-ci.yml", "ui"):                   (15, "ui-timeout-minutes"),
-    ("go-service-ci.yml", "helm"):                 (10, None),
     ("go-service-ci.yml", "ci-ok"):                (10, None),
     ("publish-image-chart.yml", "build"):          (30, "build-timeout-minutes"),
     ("publish-image-chart.yml", "merge"):          (10, None),

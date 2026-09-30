@@ -24,8 +24,11 @@ touches a workflow, a script or a test it runs actionlint over every workflow
 (configured by `.github/actionlint.yaml`), `tests/workflow-timeouts/run.sh`
 (every job declares the agreed timeout), and each engine script's fixture
 self-test (`tests/rendering-check/run.sh`, `tests/change-areas/run.sh`). It
-also calls `go-service-ci.yml` from the PR's own commit with a docs-only change
-set and checks that only `changes` and `ci-ok` ran.
+also calls `go-service-ci.yml` from the PR's own commit with four fixed change
+sets — docs-only, Go-only (in both test modes) and UI-only — against the
+fixtures in `tests/go-service-ci/`, and checks that each ran exactly the jobs
+its change areas need. The root `package.json` exists only for that UI
+fixture.
 
 ### Job timeouts
 
@@ -38,14 +41,14 @@ slow but healthy run is plausible, a caller can raise the timeout with a
 
 | Workflow | Input | Default | Jobs it bounds |
 |---|---|---|---|
-| `go-service-ci.yml` | `test-timeout-minutes` | `40` | `test-testcontainers`, `test-services` |
+| `go-service-ci.yml` | `test-timeout-minutes` | `40` | `go` |
 | `go-service-ci.yml` | `ui-timeout-minutes` | `15` | `ui` |
 | `publish-image-chart.yml` | `build-timeout-minutes` | `30` | each `build` leg (amd64, arm64) |
 | `publish-ui.yml` | `ui-timeout-minutes` | `15` | `publish` |
 | `argocd-rendering-check.yml` | `render-timeout-minutes` | `10` | `render` |
 
-Fixed at 10: `go-service-ci`'s `changes`, `backend`, `helm` and `ci-ok`, `publish-image-chart`'s
-`merge`, `commitlint`, `release-please`. In `go-service-ci`, the test jobs'
+Fixed at 10: `go-service-ci`'s `changes` and `ci-ok`, `publish-image-chart`'s
+`merge`, `commitlint`, `release-please`. In `go-service-ci`, the `go` job's
 40 minutes sits above the 30m `test-timeout` so that `go test`'s own timeout,
 with its stack dump, fires first — raise the two together.
 
@@ -55,10 +58,19 @@ Every run starts with a `changes` job that classifies the pull request's changed
 files into **change areas** — docs, Go, UI, image — and ends with `ci-ok`, the
 **suite verdict**.
 
-- **A docs-only PR runs only `changes` and `ci-ok`**, and is green. Every other
-  job (`backend`, the test jobs, `ui`, `helm`) is skipped. For any other change
-  set every job runs as before; per-area gating of the Go and UI jobs is not
-  there yet.
+- **Each PR runs only the jobs its change areas need.** The `go` job runs
+  when the Go area changed, the `ui` job when the UI area did (and a
+  `ui-package` is set). So a UI-only PR skips the Go suite, a Go-only PR skips
+  `npm ci` and the UI build, and a docs-only PR runs only `changes` and
+  `ci-ok`, green. (An image-only PR also runs neither: no job here builds the
+  image yet.)
+- **One Go job.** `go` runs every Go check on one runner — ent drift, gofmt,
+  vet and helm lint first, so they fail within about a minute, then the
+  tests — so Go setup and the module download happen once. Both test modes
+  are this job: in `services` mode it also starts the Postgres and Redis
+  service containers, in `testcontainers` mode it starts none. (It replaces
+  the former `backend`, `test-testcontainers`, `test-services` and `helm`
+  jobs.)
 - **`ci-ok` is the one check to require** in branch protection (where the plan
   allows it — see ADR 0002). It always runs, is red if any job that ran failed
   or was cancelled, and is green when jobs were skipped by change detection. In
@@ -69,8 +81,14 @@ files into **change areas** — docs, Go, UI, image — and ends with `ci-ok`, t
 - **The file list comes from the API**, not a checkout, so no deep fetch. A
   renamed file counts under both its old and its new path. A non-PR event
   (push, `workflow_dispatch`) means every area.
+- **Your layout counts.** Everything under `working-directory` and
+  `helm-chart` is Go, and everything under `ui-package` is UI — Markdown,
+  Dockerfiles and `*.go` files excepted, which keep their own area. So a Go
+  module in `go/`, a chart change or a UI package outside `packages/` does not
+  run every job.
 - **When in doubt, every area.** A file in no known area — a Makefile, a
-  workflow, a chart, anything under `.claude/` — turns on every area, as does
+  workflow, a chart that is not `helm-chart`, anything under `.claude/` —
+  turns on every area, as does
   an empty or truncated (300+ files) change set. Change detection can only ever
   run too much, never too little.
 
@@ -98,17 +116,19 @@ the classifier; its fixture self-test is `tests/change-areas/run.sh`.
 | `go-version-file` | string | `go.mod` | File `setup-go` reads the toolchain version from |
 | `test-mode` | string | `testcontainers` | `testcontainers` (Docker-in-job) or `services` (Postgres + Redis service containers) |
 | `test-timeout` | string | `30m` | `go test -timeout`. Explicit because Go's default is 600s **per package** |
-| `embed-frontend` | boolean | `false` | Write a `web/dist/index.html` stub so a `go:embed` compiles in the Go jobs |
+| `embed-frontend` | boolean | `false` | Write a `web/dist/index.html` stub (under `working-directory`) so a `go:embed` compiles in the `go` job |
 | `frontend-build` | boolean | `false` | Build the `web` workspace in the `ui` job — and, with `ui-lint`, lint it too |
 | `ui-package` | string | `""` | Workspace to build and typecheck. **Empty means the `ui` job does not run at all** |
 | `ui-lint` | boolean | `false` | Run `ui-package`'s own `lint` script — and `web`'s when `frontend-build` is on |
 | `ui-test` | boolean | `false` | Run `ui-package`'s own `test` script |
-| `helm-chart` | string | `""` | Chart path to `helm lint`. Empty means the `helm` job does not run |
+| `helm-chart` | string | `""` | Chart path to `helm lint` in the `go` job, relative to the repo root. Empty means no helm lint |
 | `node-ci-flags` | string | `""` | Extra flags for `npm ci` (e.g. `--legacy-peer-deps`) |
 | `npm-github-packages` | boolean | `false` | Authenticate `npm ci` to `npm.pkg.github.com` with `CI_TOKEN` in the `ui` job |
 | `check-ent-drift` | boolean | `true` | Regenerate `internal/ent` and fail if `internal/ent/db` drifts |
-| `check-gofmt` | boolean | `false` | Fail the `backend` job if any **tracked** Go file is not gofmt-clean |
-| `test-timeout-minutes` | number | `40` | Job timeout for the test jobs; keep it above `test-timeout` (see [Job timeouts](#job-timeouts)) |
+| `check-gofmt` | boolean | `false` | Fail the `go` job if any **tracked** Go file under `working-directory` is not gofmt-clean |
+| `runs-on` | string | `ubuntu-latest` | Runner label for the `go` job (the other jobs stay on `ubuntu-latest`). `services` mode needs a Linux runner with Docker |
+| `working-directory` | string | `.` | Where the Go module lives, relative to the repo root (e.g. `go`). Every command of the `go` job runs there; `go-version-file` and `helm-chart` stay root-relative, so pass e.g. `go-version-file: go/go.mod` too |
+| `test-timeout-minutes` | number | `40` | Job timeout for the `go` job; keep it above `test-timeout` (see [Job timeouts](#job-timeouts)) |
 | `ui-timeout-minutes` | number | `15` | Job timeout for the `ui` job |
 | `docs-exclude` | string | `""` | Extra paths that are never docs (see [change areas](#go-service-ciyml-change-areas-and-the-suite-verdict)) |
 | `test-changed-files` | string | `""` | **Test-only**, for this repo's self-test: replaces the PR's changed-file list. Callers never set it |
@@ -129,9 +149,8 @@ Four things to know before turning them on:
   declare the script**: `npm run -w <workspace> <script>` fails on a missing one
   rather than skipping it.
 - **`ui-lint` and `ui-test` require `ui-package`.** The `ui` job runs only when one is set, so
-  setting either without it is refused loudly in the `backend` job instead of
-  being silently ignored (on every PR but a docs-only one, where `backend` is
-  skipped).
+  setting either without it is refused loudly in the `changes` job — on every
+  run, whatever the PR touches — instead of being silently ignored.
 - **`npm-github-packages` writes only the credential.** Before `npm ci`, the
   `ui` job appends `//npm.pkg.github.com/:_authToken=<CI_TOKEN>` to the runner's
   `~/.npmrc` — GitHub Packages rejects installs without a token, even for public

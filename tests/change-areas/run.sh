@@ -22,12 +22,14 @@ failures=0
 pass() { printf '  ok    %s\n' "$1"; }
 fail() { printf '  FAIL  %s\n' "$1"; failures=$((failures + 1)); }
 
-# areas NAME EXPECTED FILES [DOCS_EXCLUDE]
+# areas NAME EXPECTED FILES [CLASSIFIER_ARGS...]
 # EXPECTED is the comma-separated set of areas that must be on, in the order
-# docs,go,ui,image ("" = none). FILES is newline-separated.
+# docs,go,ui,image ("" = none). FILES is newline-separated. Anything after FILES
+# is passed to the classifier (--docs-exclude, --go-dir, --ui-dir).
 areas() {
-  local name=$1 want=$2 files=$3 exclude=${4-} out got=""
-  if ! out=$(printf '%s' "$files" | bash "$CLASSIFY" --docs-exclude "$exclude" 2>/dev/null); then
+  local name=$1 want=$2 files=$3 out got=""
+  shift 3
+  if ! out=$(printf '%s' "$files" | bash "$CLASSIFY" "$@" 2>/dev/null); then
     fail "$name: classifier exited non-zero"; return
   fi
   local area
@@ -87,14 +89,15 @@ areas "unknown file beside docs is every area" $ALL \
 'README.md
 charts/app/values.yaml'
 areas "a workflow is every area" $ALL '.github/workflows/ci.yml'
-areas "docs-exclude match is not docs" $ALL 'design/spec.md' 'design/*'
-areas "docs-exclude match still classified" ui 'web/content/page.md' 'web/content/*'
+areas "docs-exclude match is not docs" $ALL 'design/spec.md' --docs-exclude 'design/*'
+areas "docs-exclude match still classified" ui 'web/content/page.md' --docs-exclude 'web/content/*'
 areas "docs-exclude, several patterns" docs \
 'README.md
 docs/guide.md' \
-'design/*
+--docs-exclude 'design/*
 prompts/*.md'
-areas "docs-exclude miss leaves docs alone" docs 'docs/guide.md' 'design/*'
+areas "docs-exclude miss leaves docs alone" docs 'docs/guide.md' --docs-exclude 'design/*'
+areas "empty docs-exclude is inert" docs 'README.md' --docs-exclude ''
 areas "empty list is every area" $ALL ''
 areas "blank lines only is every area" $ALL $'\n\n'
 areas "generated protobuf TS is Go and UI" go,ui 'packages/app-ui/src/gen/v1/service_pb.ts'
@@ -116,6 +119,36 @@ areas "rename Go -> docs (old + new path) is Go" docs,go \
 docs/x.md'
 areas "no trailing newline, CRLF" docs,go $'README.md\r\nmain.go'
 
+# --ui-dir / --go-dir: the caller's own layout, from go-service-ci's inputs
+# (ui-package is UI; working-directory and helm-chart are Go). They only ever
+# ADD a home for paths; everything outside them is classified as before.
+echo
+echo "caller directories:"
+areas "ui-package outside packages/ is UI" ui 'apps/console/src/App.tsx' --ui-dir apps/console
+areas "same file without --ui-dir is every area" $ALL 'apps/console/src/App.tsx'
+areas "ui-dir normalised (./ and trailing /)" ui 'apps/console/index.html' --ui-dir ./apps/console/
+areas "ui-dir is a directory, not a prefix" $ALL 'apps/console-old/x.ts' --ui-dir apps/console
+areas "ui-dir . or empty is inert" $ALL 'Makefile' --ui-dir . --ui-dir ''
+areas "Markdown in ui-dir is still docs" docs 'apps/console/README.md' --ui-dir apps/console
+areas "Go file in ui-dir is still Go" go 'apps/console/embed.go' --ui-dir apps/console
+areas "generated protobuf TS in ui-dir is Go and UI" go,ui 'apps/console/src/gen/v1/x_pb.ts' --ui-dir apps/console
+areas "Dockerfile in ui-dir is image" image 'apps/console/Dockerfile' --ui-dir apps/console
+areas "Go module dir (working-directory) is Go" go \
+'go/catalogue.json
+go/testdata/case.json
+go/go.mod' --go-dir go
+areas "Markdown in a go-dir is still docs" docs 'go/README.md' --go-dir go
+areas "helm-chart dir is Go" go \
+'charts/statushub/values.yaml
+charts/statushub/templates/deployment.yaml' --go-dir charts/statushub
+areas "a chart that is not helm-chart is every area" $ALL 'charts/other/values.yaml' --go-dir charts/statushub
+areas "several dirs at once" go,ui \
+'charts/app/Chart.yaml
+apps/console/src/App.tsx' --go-dir charts/app --go-dir . --ui-dir apps/console
+areas "path in both a go-dir and a ui-dir is every area" $ALL 'svc/ui/app.ts' --go-dir svc --ui-dir svc/ui
+areas "go-dir over a UI pattern is every area" $ALL 'web/app.ts' --go-dir web
+areas "glob characters in a dir are literal" $ALL 'apps/xyz/a.ts' --ui-dir 'apps/*'
+
 # verdict NAME WANT(0|1) NEEDS_JSON
 verdict() {
   local name=$1 want=$2 json=$3 rc=0
@@ -130,12 +163,12 @@ r() { printf '"%s":{"result":"%s","outputs":{}}' "$1" "$2"; }
 
 echo
 echo "suite verdict:"
-verdict "all passed" 0 "{$(r changes success),$(r backend success),$(r ui success)}"
-verdict "skipped by change detection" 0 "{$(r changes success),$(r backend skipped),$(r ui skipped)}"
-verdict "one failed" 1 "{$(r changes success),$(r backend failure),$(r ui success)}"
-verdict "one cancelled" 1 "{$(r changes success),$(r backend cancelled),$(r ui skipped)}"
-verdict "changes failed, rest skipped" 1 "{$(r changes failure),$(r backend skipped),$(r ui skipped)}"
-verdict "unknown result" 1 "{$(r changes success),$(r backend weird)}"
+verdict "all passed" 0 "{$(r changes success),$(r go success),$(r ui success)}"
+verdict "skipped by change detection" 0 "{$(r changes success),$(r go skipped),$(r ui skipped)}"
+verdict "one failed" 1 "{$(r changes success),$(r go failure),$(r ui success)}"
+verdict "one cancelled" 1 "{$(r changes success),$(r go cancelled),$(r ui skipped)}"
+verdict "changes failed, rest skipped" 1 "{$(r changes failure),$(r go skipped),$(r ui skipped)}"
+verdict "unknown result" 1 "{$(r changes success),$(r go weird)}"
 verdict "not JSON" 1 'not json'
 
 echo

@@ -15,10 +15,18 @@ on:
       npm-github-packages: { type: boolean, default: false }          # write CI_TOKEN into ~/.npmrc so `npm ci` can reach npm.pkg.github.com
       check-ent-drift:     { type: boolean, default: true }
       check-gofmt:         { type: boolean, default: false }          # fail on a tracked Go file that is not gofmt-clean
+      # The Go job's runner. A string, so today one label; the default keeps
+      # every caller on GitHub-hosted runners until a self-hosted one exists.
+      # `services` test mode needs a Linux runner with Docker.
+      runs-on:             { type: string, default: ubuntu-latest }
+      # Where the Go module lives, relative to the repo root (e.g. `go` for a
+      # repo whose go.mod is go/go.mod). Every `run:` step of the Go job runs
+      # there; `go-version-file` and `helm-chart` stay root-relative.
+      working-directory:   { type: string, default: "." }
       # Job timeouts, so a hang costs minutes rather than GitHub's 6-hour limit.
-      # The test jobs' 40 sits above the 30m `test-timeout` default, so go test's
+      # The Go job's 40 sits above the 30m `test-timeout` default, so go test's
       # own timeout (with its stack dump) fires first; raise both together.
-      # `changes`, `backend`, `helm` and `ci-ok` are fixed at 10.
+      # `changes` and `ci-ok` are fixed at 10.
       test-timeout-minutes: { type: number, default: 40 }
       ui-timeout-minutes:   { type: number, default: 15 }
       # Extra paths that are never docs (whitespace/newline-separated shell
@@ -51,8 +59,13 @@ jobs:
   # does anything the API cannot answer in full. A renamed file contributes
   # both its old and new path: moving internal/x.go to docs/x.md deletes Go.
   #
-  # Today only a docs-only PR skips anything: the jobs below run unless
-  # `docs-only` is true. Per-area gating of the Go and UI jobs is #24.
+  # The caller's own layout is passed along: `working-directory` and
+  # `helm-chart` count as Go (the `go` job vets, tests and lints them) and
+  # `ui-package` as UI, so a module in go/ or a UI package outside packages/
+  # does not fall into "no area" and run everything.
+  #
+  # The `go` job runs when the Go area is on, `ui` when the UI area is; a
+  # docs-only PR (`docs-only`, kept for the log) therefore runs neither.
   changes:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -63,6 +76,20 @@ jobs:
       image: ${{ steps.classify.outputs.image }}
       docs-only: ${{ steps.classify.outputs.docs-only }}
     steps:
+      # ui-lint and ui-test run in the `ui` job, which exists only when
+      # `ui-package` is set — so on their own they would be silently ignored, and
+      # a gate that reports nothing while looking switched on is the exact failure
+      # these inputs were added to remove. They therefore REQUIRE `ui-package`
+      # rather than implying it: the workflow cannot guess which workspace to run,
+      # and a default of "the repo root" is the root-level invocation the UI job's
+      # comment explains is worthless. This check lives here because `changes`
+      # is the one job EVERY run starts with, whatever it touches; it needs no
+      # checkout, so it fails in seconds, and ci-ok turns red with it.
+      - name: Reject UI gates without a UI package
+        if: ${{ (inputs.ui-lint || inputs.ui-test) && inputs.ui-package == '' }}
+        run: |
+          echo "::error::ui-lint/ui-test require ui-package — the UI job only runs when one is set"
+          exit 1
       # The caller's checkout is not this repo, so the classifier is fetched
       # from the commit this workflow file was resolved from — script and
       # workflow can never skew (argocd-rendering-check.yml's pattern; the
@@ -83,9 +110,15 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           DOCS_EXCLUDE: ${{ inputs.docs-exclude }}
           TEST_CHANGED_FILES: ${{ inputs.test-changed-files }}
+          GO_DIR: ${{ inputs.working-directory }}
+          HELM_CHART: ${{ inputs.helm-chart }}
+          UI_PACKAGE: ${{ inputs.ui-package }}
         run: |
           set -euo pipefail
-          classify() { bash .knkcs-workflows/scripts/change-areas.sh --docs-exclude "$DOCS_EXCLUDE"; }
+          classify() {
+            bash .knkcs-workflows/scripts/change-areas.sh --docs-exclude "$DOCS_EXCLUDE" \
+              --go-dir "$GO_DIR" --go-dir "$HELM_CHART" --ui-dir "$UI_PACKAGE"
+          }
           every_area() { echo "$1; running every area" >&2; printf 'docs=true\ngo=true\nui=true\nimage=true\n'; }
 
           if [ -n "$TEST_CHANGED_FILES" ]; then
@@ -109,34 +142,62 @@ jobs:
           if grep -qxE '(go|ui|image)=true' <<<"$areas"; then docs_only=false; fi
           printf '%s\ndocs-only=%s\n' "$areas" "$docs_only" | tee -a "$GITHUB_OUTPUT"
 
-  backend:
+  # The Go job: every Go check of the PR suite on ONE runner, so Go setup and
+  # the module download happen once and no tiny job is billed as a whole
+  # minute (it folds the former `backend`, `test-testcontainers`,
+  # `test-services` and `helm` jobs). The fast checks — ent drift, gofmt, vet,
+  # helm lint — run first, so a vet or drift error still fails in about a
+  # minute; the tests run last.
+  #
+  # Runs only when the Go change area changed (a file in no area counts as
+  # every area, so it runs then too); a UI-only or docs-only PR skips it.
+  #
+  # Both test modes are this one job. `services` mode needs Postgres and Redis
+  # service containers, and `services:` cannot be switched off with `if:` —
+  # but the runner does not start a service whose image is empty ("will not
+  # be started because the container definition has an empty image"), so the
+  # images are chosen by `test-mode` and testcontainers mode starts none.
+  #
+  # `working-directory` is where the Go module lives: every `run:` step below
+  # runs there (ent drift, gofmt, vet, tests and the embed stub are all
+  # module-relative). `go-version-file` and `helm-chart` stay relative to the
+  # repository root, as they always were.
+  go:
     needs: changes
-    if: ${{ needs.changes.outputs.docs-only != 'true' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+    if: ${{ needs.changes.outputs.go == 'true' }}
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.test-timeout-minutes }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    services:
+      postgres:
+        image: ${{ inputs.test-mode == 'services' && 'postgres:16-alpine' || '' }}
+        env: { POSTGRES_USER: ci, POSTGRES_PASSWORD: ci, POSTGRES_DB: ci }
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U ci" --health-interval 10s
+          --health-timeout 5s --health-retries 5
+      redis:
+        image: ${{ inputs.test-mode == 'services' && 'redis:7-alpine' || '' }}
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 10s
+          --health-timeout 5s --health-retries 5
     steps:
-      # ui-lint and ui-test run in the `ui` job, which exists only when
-      # `ui-package` is set — so on their own they would be silently ignored, and
-      # a gate that reports nothing while looking switched on is the exact failure
-      # these inputs were added to remove. They therefore REQUIRE `ui-package`
-      # rather than implying it: the workflow cannot guess which workspace to run,
-      # and a default of "the repo root" is the root-level invocation the UI job's
-      # comment explains is worthless. This check lives here because `backend` is
-      # the one job every non-docs-only PR runs; it needs no checkout, so it
-      # fails in seconds.
-      - name: Reject UI gates without a UI package
-        if: ${{ (inputs.ui-lint || inputs.ui-test) && inputs.ui-package == '' }}
-        run: |
-          echo "::error::ui-lint/ui-test require ui-package — the UI job only runs when one is set"
-          exit 1
       - uses: actions/checkout@v6
       - uses: knkcs/workflows/actions/configure-private-modules@v1
         with:
           ci-token: ${{ secrets.CI_TOKEN }}
-      - uses: knkcs/workflows/actions/setup-go-node@v1
+      # setup-go directly rather than the setup-go-node action: the module cache
+      # is keyed on the module's own go.sum, which is not at the root when
+      # `working-directory` is set. No Node — the embed stub below is all a
+      # `go:embed` of the frontend needs.
+      - uses: actions/setup-go@v6
         with:
           go-version-file: ${{ inputs.go-version-file }}
-          setup-node: ${{ inputs.embed-frontend }}
+          cache: true
+          cache-dependency-path: ${{ inputs.working-directory }}/go.sum
       - name: Create frontend stub for embed
         if: ${{ inputs.embed-frontend }}
         run: mkdir -p web/dist && echo '<!doctype html>' > web/dist/index.html
@@ -190,24 +251,12 @@ jobs:
           fi
       - name: Vet
         run: go vet ./...
-
-  test-testcontainers:
-    needs: changes
-    if: ${{ needs.changes.outputs.docs-only != 'true' && inputs.test-mode == 'testcontainers' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: ${{ inputs.test-timeout-minutes }}
-    steps:
-      - uses: actions/checkout@v6
-      - uses: knkcs/workflows/actions/configure-private-modules@v1
-        with:
-          ci-token: ${{ secrets.CI_TOKEN }}
-      - uses: knkcs/workflows/actions/setup-go-node@v1
-        with:
-          go-version-file: ${{ inputs.go-version-file }}
-          setup-node: "false"
-      - name: Create frontend stub for embed
-        if: ${{ inputs.embed-frontend }}
-        run: mkdir -p web/dist && echo '<!doctype html>' > web/dist/index.html
+      - uses: azure/setup-helm@v5
+        if: ${{ inputs.helm-chart != '' }}
+      - name: Helm lint
+        if: ${{ inputs.helm-chart != '' }}
+        working-directory: ${{ github.workspace }}
+        run: helm lint ${{ inputs.helm-chart }}
       # -timeout is explicit because Go's default is 600s PER PACKAGE, and a
       # package that outgrows it fails with a stack dump that reads like a
       # deadlock rather than a slow suite. A green run here is otherwise only
@@ -216,48 +265,11 @@ jobs:
       - name: Test
         run: go test -race -cover -timeout ${{ inputs.test-timeout }} ./...
 
-  test-services:
-    needs: changes
-    if: ${{ needs.changes.outputs.docs-only != 'true' && inputs.test-mode == 'services' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: ${{ inputs.test-timeout-minutes }}
-    services:
-      postgres:
-        image: postgres:16-alpine
-        env: { POSTGRES_USER: ci, POSTGRES_PASSWORD: ci, POSTGRES_DB: ci }
-        ports: ["5432:5432"]
-        options: >-
-          --health-cmd "pg_isready -U ci" --health-interval 10s
-          --health-timeout 5s --health-retries 5
-      redis:
-        image: redis:7-alpine
-        ports: ["6379:6379"]
-        options: >-
-          --health-cmd "redis-cli ping" --health-interval 10s
-          --health-timeout 5s --health-retries 5
-    steps:
-      - uses: actions/checkout@v6
-      - uses: knkcs/workflows/actions/configure-private-modules@v1
-        with:
-          ci-token: ${{ secrets.CI_TOKEN }}
-      - uses: knkcs/workflows/actions/setup-go-node@v1
-        with:
-          go-version-file: ${{ inputs.go-version-file }}
-          setup-node: "false"
-      - name: Create frontend stub for embed
-        if: ${{ inputs.embed-frontend }}
-        run: mkdir -p web/dist && echo '<!doctype html>' > web/dist/index.html
-      # -timeout is explicit because Go's default is 600s PER PACKAGE, and a
-      # package that outgrows it fails with a stack dump that reads like a
-      # deadlock rather than a slow suite. A green run here is otherwise only
-      # evidence that this runner happened to be fast enough — margin, not
-      # configuration. Raise `test-timeout` for a slow suite; do not remove it.
-      - name: Test
-        run: go test -race -cover -timeout ${{ inputs.test-timeout }} ./...
-
+  # Runs only when the UI change area changed (or a file in no area), and only
+  # for a caller with a `ui-package`.
   ui:
     needs: changes
-    if: ${{ needs.changes.outputs.docs-only != 'true' && inputs.ui-package != '' }}
+    if: ${{ needs.changes.outputs.ui == 'true' && inputs.ui-package != '' }}
     runs-on: ubuntu-latest
     timeout-minutes: ${{ inputs.ui-timeout-minutes }}
     steps:
@@ -329,16 +341,6 @@ jobs:
         working-directory: ${{ inputs.ui-package }}
         run: npx tsc --noEmit
 
-  helm:
-    needs: changes
-    if: ${{ needs.changes.outputs.docs-only != 'true' && inputs.helm-chart != '' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v6
-      - uses: azure/setup-helm@v5
-      - run: helm lint ${{ inputs.helm-chart }}
-
   # The suite verdict: the one check a branch-protection rule should require.
   # `always()` makes it run — and report — whatever happened above, including
   # a cancelled run; a required check that is skipped would read as passing.
@@ -348,7 +350,7 @@ jobs:
   # in the same `needs` context. Logic in scripts/suite-verdict.sh, tested by
   # tests/change-areas/run.sh. A new job in this workflow MUST be added here.
   ci-ok:
-    needs: [changes, backend, test-testcontainers, test-services, ui, helm]
+    needs: [changes, go, ui]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
