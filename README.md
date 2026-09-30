@@ -29,8 +29,9 @@ sets — docs-only, Go-only (in both test modes), UI-only and image-only — aga
 fixtures in `tests/go-service-ci/`, and checks that each ran exactly the jobs
 its change areas need. Three more calls run the merge check: green on clean
 fixtures with no test run, no service container and no image build, and failing on a
-Go compile error and on a UI type error (read back from the step results,
-with the test-only `test-soft-fail` keeping the run green). The root
+Go compile error and on a UI type error (read back from the workflow's
+`*-outcome` outputs, with the test-only `test-soft-fail` keeping the run
+green). The root
 `package.json` exists only for the UI fixtures.
 
 ### Job timeouts
@@ -164,6 +165,11 @@ jobs:
   runner OS as the PR suite, or the keys will not match. A cache is only saved
   by a green job, and a key that exists is never overwritten — a new `go.sum`
   or lockfile makes a new one.
+
+Outputs: `vet-outcome`, `typecheck-outcome` (the merge check's UI typecheck)
+and `test-outcome` report what the `go` job's Vet, Typecheck and Test steps did
+— `success`, `failure` or `skipped`, empty when the job did not run. A caller
+rarely needs them; this repo's self-test reads them.
 
 ### `go-service-ci.yml` inputs
 

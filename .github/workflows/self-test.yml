@@ -278,15 +278,21 @@ jobs:
     timeout-minutes: 10
     permissions:
       actions: read
+      checks: read
     steps:
+      # The run's check runs (one per job, `latest` per name so a re-run
+      # attempt replaces its predecessor), not the jobs API: that one carries
+      # every job's step list and answered 502 on this run's 45 jobs.
       - name: Each change set ran exactly the jobs its change areas need
         env:
           GH_TOKEN: ${{ github.token }}
-          JOBS_URL: repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}/jobs
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
         run: |
           set -euo pipefail
-          all=$(gh api --paginate "$JOBS_URL" --jq '.jobs[] | select(.name | test("-suite / "))' | jq -s .)
-          jobs=$(jq -r '.[] | "\(.name)=\(.conclusion)"' <<<"$all" | sort)
+          suite=$(gh api "repos/$REPO/actions/runs/$RUN_ID" --jq .check_suite_id)
+          jobs=$(gh api --paginate "repos/$REPO/check-suites/$suite/check-runs?per_page=100" \
+            --jq '.check_runs[] | select(.name | test("-suite / ")) | "\(.name)=\(.conclusion)"' | sort)
           printf '%s\n\n' "$jobs"
           # One line per job, "<suite> / <job>=<conclusion>". Every suite must
           # run `changes` and `ci-ok`, both green; the rest is per change set.
@@ -337,41 +343,30 @@ jobs:
             diff <(printf '%s\n' "$want") <(printf '%s\n' "$jobs") || true
             exit 1
           fi
-      # The merge check's own steps. A soft-failed step (test-soft-fail) keeps
-      # its job green but reports `failure` here, which is what proves the
-      # merge check fails on a compile error and on a UI type error. A step
-      # skipped by its `if:` reports `skipped`; `-` means it is not listed.
-      - name: The merge check vets, builds and typechecks, and runs no tests
+      # The merge check's own steps, from go-service-ci's `*-outcome` outputs.
+      # An outcome is taken before continue-on-error, so a soft-failed step
+      # (test-soft-fail) reads `failure` here while its job stays green — which
+      # is what proves the merge check fails on a compile error and on a UI
+      # type error. (The jobs API cannot: it reports such a step `success`.)
+      # No service container is started either: the merge-check suite's `go`
+      # job log says the runner skipped both for their empty image.
+      - name: The merge check vets and typechecks, and runs no tests
         env:
-          GH_TOKEN: ${{ github.token }}
-          JOBS_URL: repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}/jobs
+          NEEDS: ${{ toJSON(needs) }}
         run: |
           set -euo pipefail
-          all=$(gh api --paginate "$JOBS_URL" --jq '.jobs[] | select(.name | test("^merge-check-.*suite / go$"))' | jq -s .)
-          failed=0
-          # expect SUITE STEP WANT...: the step's conclusion must be one of WANT.
-          expect() {
-            local suite=$1 step=$2 got; shift 2
-            got=$(jq -r --arg job "$suite / go" --arg step "$step" \
-              '[.[] | select(.name == $job) | .steps[] | select(.name == $step) | .conclusion] | first // "-"' <<<"$all")
-            for want in "$@"; do
-              if [ "$got" = "$want" ]; then echo "ok    $suite: $step=$got"; return; fi
-            done
-            echo "::error::$suite: step '$step' is $got, want one of: $*"
-            failed=1
-          }
-          jq -r '.[] | .name as $j | .steps[] | "\($j): \(.name)=\(.conclusion)"' <<<"$all"
-          echo
-          expect merge-check-suite 'Vet' success
-          expect merge-check-suite 'Helm lint' success
-          expect merge-check-suite 'Install UI dependencies' success
-          expect merge-check-suite 'Build UI package' success
-          expect merge-check-suite 'Typecheck UI package' success
-          expect merge-check-suite 'Test' skipped -
-          expect merge-check-suite 'Initialize containers' -
-          expect merge-check-go-error-suite 'Vet' failure
-          expect merge-check-go-error-suite 'Typecheck UI package' success
-          expect merge-check-ui-error-suite 'Vet' success
-          expect merge-check-ui-error-suite 'Build UI package' success
-          expect merge-check-ui-error-suite 'Typecheck UI package' failure
-          exit "$failed"
+          got=$(jq -r 'to_entries[] | select(.key | startswith("merge-check-")) | .key as $s
+            | .value.outputs | "\($s) vet=\(.["vet-outcome"]) typecheck=\(.["typecheck-outcome"]) test=\(.["test-outcome"])"' <<<"$NEEDS" | sort)
+          printf '%s\n\n' "$got"
+          # Test is `skipped` everywhere: the merge-check suite's module has a
+          # test that always fails, so a run would also turn its job red.
+          want=$(printf '%s\n' \
+            'merge-check-suite vet=success typecheck=success test=skipped' \
+            'merge-check-go-error-suite vet=failure typecheck=success test=skipped' \
+            'merge-check-ui-error-suite vet=success typecheck=failure test=skipped' | sort)
+          if [ "$got" != "$want" ]; then
+            echo "::error::the merge check did not vet, typecheck and skip the tests as expected; want:"
+            printf '%s\n\n' "$want"
+            diff <(printf '%s\n' "$want") <(printf '%s\n' "$got") || true
+            exit 1
+          fi

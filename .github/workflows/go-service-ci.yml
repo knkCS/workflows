@@ -57,6 +57,16 @@ on:
       test-soft-fail:      { type: boolean, default: false }
     secrets:
       CI_TOKEN: { required: true }
+    # What the `go` job's key steps did: `success`, `failure` or `skipped`,
+    # empty when the job did not run. An outcome is taken BEFORE
+    # continue-on-error, so under `test-soft-fail` a failed step still reads
+    # `failure` here while its job stays green; that is how this repo's
+    # self-test asserts the merge check caught an error (the jobs API reports
+    # such a step as `success`).
+    outputs:
+      vet-outcome:       { value: "${{ jobs.go.outputs.vet }}" }
+      typecheck-outcome: { value: "${{ jobs.go.outputs.typecheck }}" }  # merge check only; the `ui` job's is not reported
+      test-outcome:      { value: "${{ jobs.go.outputs.test }}" }
 
 permissions:
   contents: read
@@ -214,6 +224,10 @@ jobs:
     if: ${{ needs.changes.outputs.go == 'true' }}
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: ${{ inputs.test-timeout-minutes }}
+    outputs:
+      vet: ${{ steps.vet.outcome }}
+      typecheck: ${{ steps.typecheck.outcome }}
+      test: ${{ steps.test.outcome }}
     defaults:
       run:
         working-directory: ${{ inputs.working-directory }}
@@ -297,6 +311,7 @@ jobs:
             exit 1
           fi
       - name: Vet
+        id: vet
         continue-on-error: ${{ inputs.test-soft-fail }}
         run: go vet ./...
       - uses: azure/setup-helm@v5
@@ -332,6 +347,7 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: npm run -w web build
       - name: Typecheck UI package
+        id: typecheck
         if: ${{ inputs.mode == 'merge-check' && inputs.ui-package != '' }}
         continue-on-error: ${{ inputs.test-soft-fail }}
         working-directory: ${{ github.workspace }}/${{ inputs.ui-package }}
@@ -342,6 +358,7 @@ jobs:
       # evidence that this runner happened to be fast enough — margin, not
       # configuration. Raise `test-timeout` for a slow suite; do not remove it.
       - name: Test
+        id: test
         if: ${{ inputs.mode != 'merge-check' }}
         run: go test -race -cover -timeout ${{ inputs.test-timeout }} ./...
 
