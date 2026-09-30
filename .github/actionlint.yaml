@@ -1,0 +1,8 @@
+# actionlint configuration, read by self-test.yml's `actionlint` job.
+paths:
+  .github/workflows/argocd-rendering-check.yml:
+    ignore:
+      # `job.workflow_sha` is a documented `job` context property (GitHub added
+      # the job.workflow_* properties on 2026-04-23); actionlint 1.7.12, the
+      # latest release, does not know it yet. Drop this once actionlint does.
+      - 'property "workflow_sha" is not defined in object type \{check_run_id: number;'

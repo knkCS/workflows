@@ -19,9 +19,33 @@ via `secrets:` / `secrets: inherit` at call time.
 | `publish-ui.yml` | Publish a UI npm package to a configurable registry (public npm or GitHub Packages) |
 | `argocd-rendering-check.yml` | Render a deploy repo's ArgoCD Applications with their real value files and schema-validate the output |
 
-`self-test.yml` is not reusable: it is this repo's own CI, running each engine
-script's fixture self-test (currently `tests/rendering-check/run.sh`) on PRs
-that touch it.
+`self-test.yml` is not reusable: it is this repo's own CI. On every PR that
+touches a workflow, a script or a test it runs actionlint over every workflow
+(configured by `.github/actionlint.yaml`), `tests/workflow-timeouts/run.sh`
+(every job declares the agreed timeout), and each engine script's fixture
+self-test (currently `tests/rendering-check/run.sh`).
+
+### Job timeouts
+
+Every job in every shared workflow declares `timeout-minutes`, so a hang costs
+minutes rather than GitHub's 6-hour job limit (in September 2026 seven hung
+image builds burned ~2,500 minutes that way). Defaults are 40 minutes for Go
+tests, 30 per image build leg, 15 for UI, and 10 for everything else. Where a
+slow but healthy run is plausible, a caller can raise the timeout with a
+`number` input; the other jobs are fixed at 10:
+
+| Workflow | Input | Default | Jobs it bounds |
+|---|---|---|---|
+| `go-service-ci.yml` | `test-timeout-minutes` | `40` | `test-testcontainers`, `test-services` |
+| `go-service-ci.yml` | `ui-timeout-minutes` | `15` | `ui` |
+| `publish-image-chart.yml` | `build-timeout-minutes` | `30` | each `build` leg (amd64, arm64) |
+| `publish-ui.yml` | `ui-timeout-minutes` | `15` | `publish` |
+| `argocd-rendering-check.yml` | `render-timeout-minutes` | `10` | `render` |
+
+Fixed at 10: `go-service-ci`'s `backend` and `helm`, `publish-image-chart`'s
+`merge`, `commitlint`, `release-please`. In `go-service-ci`, the test jobs'
+40 minutes sits above the 30m `test-timeout` so that `go test`'s own timeout,
+with its stack dump, fires first — raise the two together.
 
 ### `go-service-ci.yml` inputs
 
@@ -40,6 +64,8 @@ that touch it.
 | `npm-github-packages` | boolean | `false` | Authenticate `npm ci` to `npm.pkg.github.com` with `CI_TOKEN` in the `ui` job |
 | `check-ent-drift` | boolean | `true` | Regenerate `internal/ent` and fail if `internal/ent/db` drifts |
 | `check-gofmt` | boolean | `false` | Fail the `backend` job if any **tracked** Go file is not gofmt-clean |
+| `test-timeout-minutes` | number | `40` | Job timeout for the test jobs; keep it above `test-timeout` (see [Job timeouts](#job-timeouts)) |
+| `ui-timeout-minutes` | number | `15` | Job timeout for the `ui` job |
 
 `check-gofmt`, `ui-lint`, `ui-test` and `npm-github-packages` are opt-in and
 default to off, so enabling them is always a deliberate change to a caller's CI.
@@ -88,6 +114,7 @@ check before ArgoCD ever sees the commit.
 | `kubernetes-version` | string | `1.31.0` | Passed to `helm template --kube-version` and `kubeconform -kubernetes-version` |
 | `kubeconform-flags` | string | `-strict -ignore-missing-schemas` | Extra kubeconform flags (e.g. add a CRD schema location) |
 | `kubeconform-version` | string | `0.6.7` | kubeconform release installed (static binary, no leading `v`) |
+| `render-timeout-minutes` | number | `10` | Job timeout; raise for a deploy repo with many Applications |
 
 `CI_TOKEN` must carry read access to every private service repo the
 ApplicationSets pull charts from. A thin caller:

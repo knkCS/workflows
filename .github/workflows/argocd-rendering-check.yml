@@ -32,6 +32,7 @@ on:
       kubernetes-version:  { type: string, default: "1.31.0" }      # helm --kube-version and kubeconform -kubernetes-version
       kubeconform-flags:   { type: string, default: "-strict -ignore-missing-schemas" }
       kubeconform-version: { type: string, default: "0.6.7" }
+      render-timeout-minutes: { type: number, default: 10 }       # job timeout; raise for a deploy repo with many Applications
     secrets:
       CI_TOKEN: { required: true }  # read access to the private service repos whose charts the ApplicationSets pull
 
@@ -41,17 +42,21 @@ permissions:
 jobs:
   render:
     runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.render-timeout-minutes }}
     steps:
       # Two checkouts: the caller's repo is the tree under test; this repo
-      # carries the renderer. `github.job_workflow_sha` is the commit this
-      # reusable workflow file was resolved from, so script and workflow can
-      # never skew — whatever ref the caller pinned. The fallback ref exists
-      # only for contexts that leave the SHA empty.
+      # carries the renderer. `job.workflow_sha` is the commit this reusable
+      # workflow file was resolved from, so script and workflow can never skew
+      # — whatever ref the caller pinned. (It was spelled
+      # `github.job_workflow_sha` until actionlint flagged that no such property
+      # exists: that spelling evaluated empty, so the renderer always came from
+      # `v1`.) The fallback ref exists only for contexts that leave the SHA
+      # empty, e.g. GitHub Enterprise Server.
       - uses: actions/checkout@v6
       - uses: actions/checkout@v6
         with:
           repository: knkcs/workflows
-          ref: ${{ github.job_workflow_sha || 'v1' }}
+          ref: ${{ job.workflow_sha || 'v1' }}
           path: .knkcs-workflows
       - uses: azure/setup-helm@v5
       - name: Install kubeconform
