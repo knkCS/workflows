@@ -1,0 +1,24 @@
+# Caller template: conventional-commit linting. The same file for every
+# caller — copy it to .github/workflows/commitlint.yml as is.
+# release-please reads these commit messages to decide each version, so a
+# mislabelled commit ships a wrong version; this check catches it on the PR.
+#
+# The concurrency block is the one every template carries: cancel a
+# superseded run on a PR, never on `main` (this workflow never runs there).
+name: Commitlint
+on:
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# pull-requests: read lets the reusable workflow list the PR's commits. It must
+# be granted here: a called workflow can never have more than its caller.
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  commitlint:
+    uses: knkcs/workflows/.github/workflows/commitlint.yml@v1

@@ -1,0 +1,107 @@
+# Caller template: `main` for the release publish model (knkCS). Copy it to
+# .github/workflows/main.yml in the caller, fill in the <placeholders>, and
+# delete the publish job you do not need. It replaces a caller's separate
+# release workflow and the `push: main` trigger of its PR suite workflow: the PR suite
+# (templates/pr.yml) runs on pull requests only. docs/adopting.md walks
+# through every step.
+#
+# One workflow, one order, on every push to main:
+#
+#   merge-check ──► release-please ──► publish-image-chart  (if the root released)
+#                                  └─► publish-ui           (if the UI package released)
+#
+# - The merge check (go-service-ci in `merge-check` mode) is the release gate:
+#   release-please `needs:` it, so a `main` that does not compile never opens
+#   a release PR, cuts a tag, or publishes an image, chart or package. On
+#   knkCS nothing else stops a broken merge (ADR 0002).
+# - release-please and the publish jobs live in this same workflow because a
+#   release created with GITHUB_TOKEN starts no other workflow; gating on its
+#   outputs here is the only way the publish runs at all.
+# - The concurrency block is the one every template carries: it cancels only on
+#   `pull_request`, so runs on `main` queue and a publish is never interrupted
+#   halfway. (GitHub keeps one pending run per group; a newer push replaces an
+#   older pending one, which is safe here — the newer run checks the newer tree
+#   and release-please reads the whole history.)
+# - `@v1`, never a SHA or `@main` (ADR 0003). No `timeout-minutes`: GitHub
+#   rejects it on a job that calls a reusable workflow, and the called jobs
+#   carry their own.
+name: Main
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  merge-check:
+    uses: knkcs/workflows/.github/workflows/go-service-ci.yml@v1
+    with:
+      mode: merge-check
+      # Exactly the values templates/pr.yml passes: they make up the cache key,
+      # and this run is what saves the `main`-scoped Go and npm caches that
+      # every PR restores. Different values, cold PRs.
+      go-version-file: go.mod
+      working-directory: .
+      runs-on: ubuntu-latest
+      # The same layout inputs as the PR suite, so the merge check vets, lints
+      # and typechecks the same tree. The PR-suite-only inputs (test-mode,
+      # ui-lint, ui-test, image-check) have no effect here and are left out.
+      helm-chart: <chart-path>          # e.g. charts/<name>
+      ui-package: <ui-package-path>     # e.g. packages/<name>-ui
+      embed-frontend: false
+      frontend-build: false
+      check-ent-drift: true
+      check-gofmt: true
+    secrets:
+      CI_TOKEN: ${{ secrets.CI_TOKEN }}
+
+  release-please:
+    needs: merge-check
+    uses: knkcs/workflows/.github/workflows/release-please.yml@v1
+    permissions:
+      contents: write
+      pull-requests: write
+    # Deliberately no secrets. CI_TOKEN is a read-only PAT, and release-please
+    # prefers it over GITHUB_TOKEN whenever it is passed — its first write then
+    # fails with a masked "Error adding to tree". Without it the workflow uses
+    # GITHUB_TOKEN (docs/adopting.md, "The CI_TOKEN secret").
+
+  publish-image-chart:
+    needs: release-please
+    # The root (".") component's outputs are UNPREFIXED (release_created,
+    # version); only non-root paths carry a "<path>--" prefix.
+    if: ${{ fromJSON(needs.release-please.outputs.outputs_json)['release_created'] == 'true' }}
+    uses: knkcs/workflows/.github/workflows/publish-image-chart.yml@v1
+    permissions:
+      contents: read
+      packages: write
+    with:
+      chart-path: <chart-path>          # e.g. charts/<name>
+      chart-name: <chart-name>          # e.g. <name>
+      version: ${{ fromJSON(needs.release-please.outputs.outputs_json)['version'] }}
+    secrets:
+      # The Dockerfile's BuildKit secret `ci_token`, for private modules. GHCR
+      # is pushed to with the workflow's own GITHUB_TOKEN.
+      CI_TOKEN: ${{ secrets.CI_TOKEN }}
+
+  publish-ui:
+    needs: release-please
+    # A non-root component: its outputs carry the "<path>--" prefix.
+    if: ${{ fromJSON(needs.release-please.outputs.outputs_json)['<ui-package-path>--release_created'] == 'true' }}
+    uses: knkcs/workflows/.github/workflows/publish-ui.yml@v1
+    permissions:
+      contents: read
+      packages: write
+    with:
+      package-dir: <ui-package-path>    # e.g. packages/<name>-ui
+      tag-prefix: <ui-component>-v      # the component in release-please-config.json, e.g. <name>-ui-v
+      tag-name: ${{ fromJSON(needs.release-please.outputs.outputs_json)['<ui-package-path>--tag_name'] }}
+    secrets:
+      # Public npm. For GitHub Packages pass no secret and set
+      # `registry-url: https://npm.pkg.github.com` instead (README, publish-ui).
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}

@@ -1,0 +1,406 @@
+# Adopting knkcs/workflows
+
+How a repo in `knkCS` or `knkcms` becomes a **caller** of this repo: copy the
+**caller templates** for its publish model, fill in the placeholders, and work
+through the checklist below. Nothing here needs reverse-engineering another
+repo — if you find you do, this guide is missing something; fix it here.
+
+The vocabulary (PR suite, merge check, suite verdict, release, staging image,
+change area, caller template) is defined in [`CONTEXT.md`](../CONTEXT.md); the
+decisions behind the rules are ADRs [0001](adr/0001-arm64-is-a-developer-platform-built-natively.md)
+(arm64 only by native build), [0002](adr/0002-knkcs-stays-on-free-without-enforced-checks.md)
+(knkCS checks are advisory) and [0003](adr/0003-callers-pin-v1-only.md)
+(`@v1` only). Every input of every shared workflow is documented in the
+[README](../README.md).
+
+> **Before `v1` moves.** The templates call the PR suite and merge check that
+> `go-service-ci` has on `main` of this repo: `mode`, change areas, `ci-ok`,
+> `working-directory`, `image-check` and the timeout inputs — and the
+> staging image workflow exists only there. `v1` moves to them only after the
+> pilots are green (statushub, #29; layout, #30). Until then, `v1` does
+> not declare those inputs and a copied template fails at startup (an
+> undeclared input is an error, not ignored — ADR 0003). Check with
+> `git ls-remote https://github.com/knkcs/workflows refs/tags/v1` against the
+> release notes of #29; do not work around it with a SHA or `@main` pin.
+
+## The caller templates
+
+| Template | Copy to | For | What it wires |
+|---|---|---|---|
+| [`templates/pr.yml`](../templates/pr.yml) | `.github/workflows/ci.yml` | both publish models | The PR suite: `go-service-ci` on `pull_request`, superseded runs cancelled |
+| [`templates/commitlint.yml`](../templates/commitlint.yml) | `.github/workflows/commitlint.yml` | both publish models | Conventional-commit linting on `pull_request` |
+| [`templates/release/main.yml`](../templates/release/main.yml) | `.github/workflows/main.yml` | the release model | On `push: main`: merge check → release-please → `publish-image-chart` / `publish-ui` |
+| [`templates/staging-image/main.yml`](../templates/staging-image/main.yml) | `.github/workflows/main.yml` | the staging image model | On `push: main`: merge check → `staging-image` |
+
+The PR suite template sits at the top of `templates/`, not under a publish
+model, because it is the same file for both: what differs between the models
+is only what happens on `main`.
+
+Every template carries the same concurrency block:
+
+```yaml
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+```
+
+One group per workflow and PR (or ref). A new push to a PR cancels its
+superseded run; a run on `main` is never cancelled, because `main` publishes —
+it queues behind the one in progress. (GitHub keeps one *pending* run per
+group, so a burst of merges runs the first and the last; the last checks the
+newest tree and release-please reads the whole history, so nothing is lost.)
+Keep the block verbatim: it is identical everywhere precisely so that copying
+it into the wrong file cannot cancel a publish.
+
+This repo's self-test lints every template with actionlint and runs
+`tests/caller-templates/run.sh`, which checks what actionlint cannot see
+across the `@v1` boundary: every input and secret a template passes is one the
+called workflow declares, every call is `@v1`, and the `main` templates gate
+everything on the merge check.
+
+## Adopting, step by step
+
+1. **Pick the publish model.** knkCS repos use the [release](#release) model;
+   knkcms repos whose staging follows `main` use the
+   [staging image](#staging-image) model.
+2. **Set the `CI_TOKEN` secret** with the access your repo needs
+   ([below](#the-ci_token-secret)).
+3. **Copy `templates/pr.yml` and `templates/commitlint.yml`.** Fill in the
+   `<placeholders>`; delete the inputs you do not need (the README's
+   `go-service-ci` input table says what each does). Remove `push: main`
+   from the existing PR suite workflow — `main` runs the merge check instead.
+4. **Copy your model's `main` template.** It replaces the repo's existing
+   release workflow. Pass the merge check exactly the `go-version-file`,
+   `working-directory` and `runs-on` the PR suite passes, and the same layout
+   inputs (`helm-chart`, `ui-package`, `embed-frontend`, `frontend-build`,
+   `check-ent-drift`, `check-gofmt`), so it checks the same tree and warms the
+   caches PRs restore.
+5. **Configure release-please** (release model,
+   [below](#release-please-configuration)), or check the deploy repo's
+   staging values file (staging image model, [below](#staging-image)).
+6. **Make the Dockerfile conform** ([below](#dockerfile-requirements)), then
+   turn on `image-check` in the PR suite.
+7. **Wait for — and where the plan allows, require — the suite verdict**
+   ([below](#requiring-the-suite-verdict)).
+8. **Audit the repo against the [anti-pattern checklist](#anti-pattern-checklist)**
+   and delete what it finds.
+9. **Update your row in the [adoption status](#adoption-status) table.**
+
+A repo-specific check the shared workflow cannot express (a scope check, a
+second Go module, buf, a frontend suite `ui-test` does not cover) stays a job
+of its own in the caller's `ci.yml`, beside the `ci` job — with its own
+`timeout-minutes`, and inheriting the file's concurrency. Say in a comment why
+it cannot be an input, and prefer asking for the input here if it would
+generalise.
+
+## The `CI_TOKEN` secret
+
+`CI_TOKEN` is the `knk-ci` fine-grained PAT, stored as a **repository secret**
+in each caller (not an org secret today). This repo's workflows contain no
+secrets; the caller passes it by name at call time:
+
+```yaml
+    secrets:
+      CI_TOKEN: ${{ secrets.CI_TOKEN }}
+```
+
+Pass secrets by name, not `secrets: inherit`: a called workflow then sees only
+what it needs, and it is visible in the caller which job gets which token.
+
+What it needs access to — **read-only**, unless noted:
+
+| Used by | For | Access |
+|---|---|---|
+| `go-service-ci` (`go`, `ui`, `image` jobs) | Private Go modules via `configure-private-modules` (sets `GOPRIVATE=github.com/knkcs/*` only) | Contents: read on every private `knkcs/*` repo in the module graph |
+| `go-service-ci` with `npm-github-packages` | `npm ci` from `npm.pkg.github.com` | `read:packages` for every scope the lockfile pulls (GitHub Packages needs a token even for public packages) |
+| `go-service-ci` `image` job, `publish-image-chart` | The Dockerfile's BuildKit secret `ci_token` | Whatever the Dockerfile fetches with it — normally the same module access as above |
+| `argocd-rendering-check` | Charts pulled from private service repos | Contents: read on each of those repos |
+| `staging-image` | Committing the SHA into the deploy repo's staging values (`update-staging`) | Contents: **write** on the deploy repo (`knkcms/deploy` by default) |
+
+Not used for: pushing images and charts to GHCR (the workflow's own
+`GITHUB_TOKEN`, with `packages: write` granted by the caller) and publishing to
+public npm (`NPM_TOKEN`, or `GITHUB_TOKEN` for GitHub Packages).
+
+**Do not pass `CI_TOKEN` to `release-please`.** release-please prefers it over
+`GITHUB_TOKEN` whenever it is present, and with a read-only token its first
+write fails with a masked `Error adding to tree` (statushub hit exactly
+this; odon's release workflow records the same limit). Without it, release-please uses `GITHUB_TOKEN`, which is enough on
+knkCS. The consequence: a release PR opened with `GITHUB_TOKEN` starts no
+`pull_request` workflow, so it gets no PR suite of its own. The merge check
+still runs when it merges, and gates the publish.
+
+The token must never reach an image: it goes into a build only as a BuildKit
+secret, never a build-arg ([Dockerfile requirements](#dockerfile-requirements)).
+Once no caller passes it as a build-arg any more, it is rotated (#36).
+
+## Publish models
+
+### Release
+
+The knkCS model. A **release** is cut when a release-please PR merges; the
+image, chart and UI package are published from that release, never from an
+arbitrary `main` commit, so `:latest` means the newest release.
+
+`templates/release/main.yml` runs on every push to `main`:
+
+```text
+merge-check ──► release-please ──► publish-image-chart  (if the root component released)
+                               └─► publish-ui           (if the UI package released)
+```
+
+- **The merge check gates everything.** `release-please` `needs:` the merge
+  check job, so a `main` where two green PRs no longer compile together opens
+  no release PR, cuts no tag and publishes nothing. On knkCS this is the only
+  safety net (ADR 0002).
+- **Publishing lives in the same workflow**, gated with `if:` on
+  release-please's outputs. A release created with `GITHUB_TOKEN` triggers no
+  other workflow, so an `on: push: tags` publish workflow would never run for
+  it.
+- **Output names.** The root (`.`) component's outputs are unprefixed
+  (`release_created`, `version`); every other component's are prefixed with
+  its path and `--` (`packages/<name>-ui--release_created`,
+  `packages/<name>-ui--tag_name`). Read them through `outputs_json`, as the
+  template does.
+- **Permissions per job.** The workflow grants `contents: read`; the
+  release-please job adds `contents: write` and `pull-requests: write`, the
+  publish jobs `packages: write`. A called workflow can never have more than
+  its calling job grants.
+- **Keep a manual escape hatch** if you want one: a `workflow_dispatch`
+  workflow calling `publish-image-chart` with `ref: v<version>` republishes a
+  release without a new merge (statushub's `publish-image-manual.yml`).
+
+A repo that releases only a Go module (versionkit) deletes both publish jobs; a
+repo without a UI package deletes `publish-ui`; the merge check and the
+`needs:` stay.
+
+#### release-please configuration
+
+Two files at the repo root, read by `release-please.yml` (override the paths
+with its `config-file` / `manifest-file` inputs):
+
+- `release-please-config.json` — one entry under `packages` per released
+  component. The service at `.` with `"release-type": "go"`, and
+  `"include-component-in-tag": false` so its tags are plain `vX.Y.Z` — the
+  `version` `publish-image-chart` receives and the ref a manual republish
+  builds from. A UI package at its path with `"release-type": "node"`, a
+  `component` and `"include-component-in-tag": true`, so its tags are
+  `<component>-vX.Y.Z` — `publish-ui`'s `tag-prefix` is `<component>-v`. Extra
+  Go modules released in lockstep (`gen`, `client`) go in a `linked-versions`
+  plugin group. `"bump-minor-pre-major": true` keeps a `feat!` below 1.0 from
+  cutting 1.0.0.
+- `.release-please-manifest.json` — the current version of each component,
+  written by release-please. It counts as docs for change detection, so a
+  release PR that only bumps it runs no suite.
+
+statushub's config is the reference:
+
+```json
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "tag-separator": "-",
+  "bump-minor-pre-major": true,
+  "packages": {
+    ".": { "release-type": "go", "component": "<name>", "include-component-in-tag": false },
+    "packages/<name>-ui": {
+      "release-type": "node", "component": "<name>-ui",
+      "package-name": "@knkcs/<name>-ui", "include-component-in-tag": true
+    }
+  }
+}
+```
+
+Versions come from the conventional-commit types on `main` (`feat` → minor,
+`fix` → patch, `!` → breaking), which is why `commitlint.yml` runs on every PR:
+a mislabelled commit ships a wrong version.
+
+### Staging image
+
+The knkcms model. Staging follows `main`: every push to `main` publishes a
+**staging image** tagged with the commit SHA (and `latest`) and points the
+deploy repo's staging values at it — no release, no version.
+
+`templates/staging-image/main.yml` runs on every push to `main`:
+
+```text
+merge-check ──► staging-image ──► publish (image + chart) ──► update-staging (deploy repo)
+```
+
+- **The merge check gates it**, exactly as in the release model: staging never
+  receives a `main` that does not compile.
+- **The build is the release model's.** `staging-image` calls
+  `publish-image-chart` with the SHA as `version`: each architecture on its
+  own native runner (ADR 0001), GHA-cached, merged into one manifest tagged
+  `<sha>` and `latest`. The chart is pushed at the version its `Chart.yaml`
+  declares, since a SHA is no chart version.
+- **The deploy repo** (`deploy-repo`, default `knkcms/deploy`) gets the SHA in
+  the top-level `image.tag` of `staging-values-path` — nothing else in the
+  file — committed as `github-actions[bot]`. The values file must already have
+  an `image.tag`; a run whose SHA is already there commits nothing, and a
+  push race with another service's update is retried on the new tip.
+- **Never cancel on `main`**: a cancelled run can leave the image pushed and
+  staging not pointed at it. The shared concurrency block guarantees it.
+- **A UI package** in a staging-image repo is still released through
+  release-please and `publish-ui` (knkcms/template does); add those jobs
+  behind the merge check as in the release template.
+
+Inputs and the exact deploy-repo edit are in the README's
+[`staging-image.yml`](../README.md#staging-imageyml-the-staging-image-publish-model)
+section.
+
+## Dockerfile requirements
+
+Every image built by `publish-image-chart`, the `image-check` job of
+`go-service-ci` or the staging image workflow must:
+
+- **Take `CI_TOKEN` only as the BuildKit secret `ci_token`**, mounted for the
+  one `RUN` that needs it — never `ARG`/`ENV`, never a `--build-arg`. A
+  build-arg lands in the image's history and layers, readable by anyone who
+  can pull it. Point git at the token through a throwaway config, so nothing
+  of it persists in the layer:
+
+  ```dockerfile
+  # syntax=docker/dockerfile:1
+  RUN --mount=type=secret,id=ci_token \
+      --mount=type=cache,target=/go/pkg/mod \
+      --mount=type=cache,target=/root/.cache/go-build \
+      export GIT_CONFIG_GLOBAL=/tmp/git-ci-config && \
+      git config --global url."https://$(cat /run/secrets/ci_token)@github.com/".insteadOf "https://github.com/" && \
+      go mod download && \
+      CGO_ENABLED=0 go build -ldflags="-w -s" -o /out/<name> ./cmd/<name> && \
+      rm -f "$GIT_CONFIG_GLOBAL"
+  ```
+
+  (`ENV GOPRIVATE=github.com/knkcs/*` in the stage, too.) `image-check` passes
+  the secret on every PR build, so a Dockerfile without the mount still
+  builds as long as it fetches nothing private.
+- **Build natively, never under emulation** (ADR 0001). Every published image
+  includes `linux/arm64` for developers, and arm64 may only come from a native
+  build. `publish-image-chart` builds each architecture on a runner of that
+  architecture, so any Dockerfile is native there. `staging-image` builds through it too.
+  A Dockerfile that is built for both architectures on **one** runner
+  (knkcms/template's hand-rolled release, until #31) must cross-compile: build stages `FROM --platform=$BUILDPLATFORM`, with the
+  compiler targeting `$TARGETOS`/`$TARGETARCH`, so only the final stage — which
+  runs nothing — is of the target architecture:
+
+  ```dockerfile
+  FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS build
+  ARG TARGETOS TARGETARCH
+  RUN ... GOOS=$TARGETOS GOARCH=$TARGETARCH CGO_ENABLED=0 go build ...
+  FROM --platform=$BUILDPLATFORM node:24-alpine AS web   # npm ci runs natively too
+  FROM gcr.io/distroless/static-debian12:nonroot
+  COPY --from=build /out/<name> /usr/local/bin/<name>
+  ```
+
+  A `RUN` in a target-architecture stage (`npm ci`, `apk add`) is what hung
+  for 6 hours under QEMU in September 2026. Never add `setup-qemu-action`.
+- **Accept `VERSION`, `COMMIT` and `DATE` build-args** if it stamps them into
+  the binary; `publish-image-chart` passes all three.
+- **Live at `<image-context>/Dockerfile`** (the repo root by default) and keep
+  its inputs under the image change area — `Dockerfile*`, `.dockerignore`,
+  `docker/**` — or, being Go or UI files, under theirs.
+
+## Requiring the suite verdict
+
+`ci-ok` — shown as `ci / ci-ok` with the template's job name — is the **suite
+verdict**: always reported, red if any check that ran failed or was cancelled,
+green when change detection skipped a job. It is the one check to wait for, and
+the only one to require:
+
+- **knkcms** (Team plan): require `ci / ci-ok` in branch protection or a
+  ruleset on `main`, and nothing else. Never require the individual jobs:
+  GitHub reports a skipped job to branch protection as passing, whatever the
+  reason it was skipped.
+- **knkCS** (Free plan, ADR 0002): private repos cannot have branch protection,
+  so nothing enforces it. Humans and agents wait for `ci / ci-ok` to be green
+  before merging, and the merge check on `main` gates every release.
+
+## Pinning: `@v1` only
+
+Every `uses:` of this repo — reusable workflow or composite action — is
+`@v1` (ADR 0003). Never a commit SHA, never `@main`, never a branch.
+
+- `v1` moves on backward-compatible changes, so a cost or security fix here
+  reaches every caller without a migration. Breaking changes go to `v2`.
+- A SHA pin is not hermetic (`go-service-ci` calls its composite actions and
+  scripts at `v1`/its own ref anyway), and it silently misses every later fix.
+- The reason usually given for a SHA pin — "a reusable workflow ignores an
+  input it does not declare" — is false: an undeclared input fails the run at
+  startup, loudly. Nothing can silently turn a gate off.
+- A change here is proven on one caller (statushub) against a branch ref of
+  this repo before `v1` moves. That branch ref lives on a pilot PR only, never
+  on `main` of a caller.
+
+## Anti-pattern checklist
+
+Run from the root of the caller, in bash. They are greps, so they
+over-report: read every hit, and ask whether it is the anti-pattern — a
+comment, or `cancel-in-progress: true` in a workflow that only runs on
+`pull_request`, is fine. A caller that matches its templates prints nothing
+but row 8's `uses:` lines, whose `needs:` you check by eye.
+
+| # | Anti-pattern | Find it | Fix |
+|---|---|---|---|
+| 1 | **QEMU / emulated builds** — `setup-qemu-action`, or `platforms:` with `arm64` on one runner over a Dockerfile that does not cross-compile | `grep -rn 'setup-qemu-action' .github/workflows/` and `grep -rn 'platforms:.*arm64' .github/workflows/` | Publish through `publish-image-chart` (or the staging image workflow); make the Dockerfile cross-compile ([requirements](#dockerfile-requirements)) |
+| 2 | **Hand-rolled build/push** — the caller builds or pushes an image or chart itself | `grep -rnE 'docker/build-push-action\|docker (build\|push)\|buildx (build\|imagetools)\|helm (package\|push)' .github/workflows/` | Publishing: the `main` template of your model. A PR-time image build: `image-check: true` in the PR suite |
+| 3 | **Token as build-arg** — `CI_TOKEN`/`GH_TOKEN`/`NPM_TOKEN` handed to a build as an argument, or declared as `ARG`/`ENV` in a Dockerfile | `grep -rnE -A6 'build-args:\|--build-arg' .github/workflows/ \| grep -i token` and `find . -name 'Dockerfile*' -not -path './node_modules/*' -exec grep -nHE '^\s*(ARG\|ENV)\s+\S*TOKEN' {} +` | BuildKit secret `ci_token` and a `RUN --mount=type=secret,id=ci_token` ([requirements](#dockerfile-requirements)) |
+| 4 | **SHA or `@main` pins** of this repo | `grep -rniE 'knkcs/workflows/[^ ]+@' .github/workflows/ \| grep -vE '@v1(\s\|$)'` | `@v1` ([policy](#pinning-v1-only)) |
+| 5 | **Missing timeouts** — a job that runs steps without `timeout-minutes` (a `uses:` job cannot have one; its called jobs do) | `python3 -c "import glob,yaml;[print(f,j) for f in glob.glob('.github/workflows/*.y*ml') for j,s in (yaml.safe_load(open(f)).get('jobs') or {}).items() if 'uses' not in s and 'timeout-minutes' not in s]"` | `timeout-minutes:` on every such job: 10 for small jobs, the class defaults in the README for the rest |
+| 6 | **No concurrency, or cancelling on `main`** | `grep -L '^concurrency:' .github/workflows/*.y*ml` and `grep -rn 'cancel-in-progress: true' .github/workflows/` | The templates' concurrency block, verbatim |
+| 7 | **The PR suite again on `push: main`** — a `go-service-ci` call in a workflow triggered by `push` without `mode: merge-check` | `grep -ln 'go-service-ci' .github/workflows/* \| xargs grep -ln 'push:' \| xargs grep -L 'mode: merge-check'` | `pull_request` only in `ci.yml`; `main` runs the merge check from the `main` template |
+| 8 | **Release not gated on the merge check** — a `release-please` call without `needs:` on the merge check, or in a workflow of its own | `grep -rn -B2 -A2 'release-please.yml@' .github/workflows/` and look for the `needs:` | The release `main` template |
+| 9 | **Publishing from a tag-triggered workflow** that expects release-please's tags (they are created with `GITHUB_TOKEN` and trigger nothing) | `grep -rn -A3 'tags:' .github/workflows/` | Publish jobs gated on release-please's outputs in `main.yml` |
+| 10 | **`CI_TOKEN` passed to release-please** (directly or by `secrets: inherit`) | `grep -rn -A4 'release-please.yml@' .github/workflows/ \| grep -E '^\S+-[0-9]+-\s*secrets:'` | No secrets on that job ([`CI_TOKEN`](#the-ci_token-secret)) |
+| 11 | **Test-only inputs** in a caller | `grep -rnE 'test-changed-files\|test-soft-fail' .github/workflows/` | Delete them — they exist for this repo's self-test only |
+
+## Adoption status
+
+One row per active caller in both orgs, and per active repo that does not
+adopt, with why. Read from each repo's default branch on **2026-09-30** (the
+commit is next to the name); `v1` then pointed at `7d6dc74`, before the PR
+suite / merge check rework. The migration tickets update their rows as they
+land.
+
+Columns: the **publish model** as the repo does it today; the shared
+**workflows** and actions it uses; its **pin**; the **notes** list what is
+hand-rolled and why, and what the anti-pattern checklist finds.
+
+Not listed: repos with no workflows of their own and outside #21's analysis
+(knkCS claude-agent-infra, author-portal), and repos with no push since early
+August 2026 (knkCS image-to-formula, compare-xml, guardian*, reel,
+doc-converter; knkcms knkcms-seed and the older repos).
+
+### knkCS
+
+| Repo | Publish model | Uses | Pin | Notes | Ticket |
+|---|---|---|---|---|---|
+| statushub (`82311ba`) | release (image + chart, UI package) | `go-service-ci`, `commitlint`, `release-please`, `publish-image-chart` (also a manual dispatch), `publish-ui` | `@v1` | Nothing hand-rolled. The PR suite runs again in full on `push: main`; release is a separate workflow, not gated on any check; no concurrency anywhere. | #29 (pilot) |
+| taskhub (`cb62ee2`) | release (UI package) + an image and chart pushed on every push to `main` | `go-service-ci`, `release-please`, `publish-ui`; actions `configure-private-modules`, `setup-go-node` | `go-service-ci` at SHA `9624529`, the rest `@v1` | SHA pin from the false "undeclared inputs are ignored" belief. Hand-rolled `docker` job pushes `:latest` + SHA image and chart on each push to `main`, nobody consumes it, `GH_TOKEN` as build-arg, no timeout. `scope-check` is repo-specific (entscope) and stays. Full suite on `push: main`; no CI concurrency. | #32 |
+| mediahub (`6e32f85`) | release (UI package) + an image and chart pushed on every push to `main` | `go-service-ci`, `release-please`, `publish-ui` | `@v1` | Hand-rolled `publish.yml`: amd64 + arm64 under QEMU, `GH_TOKEN` as build-arg, no timeout — the five 6-hour hangs of September 2026. Full suite on `push: main`; no CI concurrency. | #32 |
+| flowhub (`73ca502`) | UI package by hand-pushed `flowhub-ui-v*` tag; no release-please, no image publish | `go-service-ci`, `publish-ui` | `@v1` | `proto` job (buf lint + gen drift — the shared workflow knows no buf) stays. `image` job builds the image on every PR (BuildKit secret, correctly), no timeout → `image-check`. Full suite on `push: main`; no concurrency. | #33 |
+| mailhub (`5362741`) | release (image + chart) | `go-service-ci`, `commitlint`, `release-please`, `publish-image-chart` (also manual); actions `configure-private-modules`, `setup-go-node` | `@v1` | Own `ui` job (builds the package before the `web` host, an order the shared `ui` job does not have) and `modules` job (gen/client dependency rule), neither with a timeout. Release queues but is not gated on a check. Full suite on `push: main`. | #33 |
+| messengerhub (`4490b24`) | release (image + chart, UI package) | `go-service-ci`, `commitlint`, `release-please`, `publish-image-chart` (also manual), `publish-ui` | `@v1` | Own `collisions` (duplicate proto field / migration numbers), `modules` (gen, client are separate modules), `e2e-compiles` (e2e build tag) and `frontend` (React suites; `ui-test` is not on) jobs, none with a timeout. Release not gated, no concurrency. | #33 |
+| authorhub (`4afd9ee`) | release (image + chart, UI package) | `go-service-ci`, `commitlint`, `release-please`, `publish-image-chart` (also manual), `publish-ui` | `@v1` | Own `collisions`, `modules` (gen module) and `frontend` jobs, none with a timeout. Release not gated, no concurrency. | #34 |
+| blueprinthub (`5289c7e`) | release (image + chart, UI package) | `go-service-ci`, `commitlint`, `release-please`, `publish-image-chart`, `publish-ui`; actions `configure-private-modules`, `setup-go-node` | `go-service-ci` at SHA `7d6dc74` (= `v1` today), the rest `@v1` | SHA pin from the false "undeclared inputs are ignored" belief. Own `web-test` (`ui-test` covers `ui-package` only, #19), `scope-check` and `gen-module` jobs, none with a timeout. Release queues but is not gated. | #34 |
+| versionkit (`9fcc922`) | release (Go module tag only) | `go-service-ci`, `commitlint`, `release-please` | `@v1` | Nothing hand-rolled. Release queues but is not gated; full suite on `push: main`. | #34 |
+| odon (`d44ba49`) | release (image + chart); UI package by hand-pushed `odon-ui-v*` tag | `release-please`, `publish-image-chart` | `@main` | `@main` left over from validating the native-arm build. Its PR checks are its own workflow (services-mode tests need env `go-service-ci` lacks), no concurrency or timeouts, full run on `push: main`. `publish-odon-ui.yml` is a hand-rolled tag-triggered npm publish that `publish-ui` could do. | #35 |
+| fieldkit (`aaf9803`) | npm package (`@knkcs/fieldkit`) by hand-pushed `v*` tag; Go module in `go/` | `go-service-ci`, `commitlint`; action `configure-private-modules` | `@v1` | `go.yml` passes `working-directory`, which `v1` does not declare yet, so every Go run is a `startup_failure` until `v1` moves. Its module also needs private `knkcms/knkeditor/go`, outside the `GOPRIVATE=github.com/knkcs/*` the shared workflow sets. Own Node `ci.yml`, publish and Storybook workflows, none with timeouts. | #35 |
+| commons (`250e08a`) | — (Go library) | nothing | — | No CI at all. | #35 |
+| platform-deploy (`6987c6a`) | — (deploy repo) | `argocd-rendering-check` | `@v1` | Thin caller. No concurrency. | — |
+| authorhub-deploy (`7972944`) | — (deploy repo) | `argocd-rendering-check` | `@v1` | Thin caller. No concurrency. | — |
+| legalcitationhub (`ad4af44`) | — | `commitlint` | `@v1` | Commitlint only; no code CI yet. | — |
+| contenthub (`3fa908f`) | — | `commitlint` | `@v1` | Commitlint only; no code CI yet. | — |
+| showcase (`55d019f`) | — | nothing | — | Not a caller: Node/TypeScript. Own `check.yml`, with concurrency and a timeout. | — |
+| anker (`38cfe5b`) | npm package by hand-pushed `v*` tag | nothing | — | Not a caller: Node/TypeScript library. Own CI, publish and Storybook workflows, no concurrency or timeouts. | — |
+| skills (`ca67643`) | GitHub release by `v*` tag | nothing | — | Not a caller: Python. No concurrency or timeouts. | — |
+| xmlmapper (`f9e8f53`) | release-please (Go module) | nothing | — | Not a caller yet: a Go library with its own CI and release-please, predating this repo and outside #21's analysis. No concurrency or timeouts; full run on `push: main`. | — |
+
+### knkcms
+
+| Repo | Publish model | Uses | Pin | Notes | Ticket |
+|---|---|---|---|---|---|
+| template (`e9add02`) | staging image (hand-rolled; shared `staging-image` planned, #31) + UI package via release-please | `publish-ui` (GitHub Packages) | `@v1` | `release.yaml` builds amd64 + arm64 cross-compiled on one runner (no QEMU since knkcms/template#232) with `GH_TOKEN`/`NPM_TOKEN` as build-args, then `update-staging` writes the SHA into knkcms/deploy; no timeouts. Own release-please job (custom outputs). Its specialised PR-only CI (change detection, `ci` verdict, concurrency, no timeouts) stays its own — out of #21's scope — and also passes the tokens as build-args. | #31 |
+| core (`e5cc066`) | release (image + chart) | `release-please`, `publish-image-chart` | `@v1` | Specialised PR-only CI with concurrency, timeouts and a `ci` verdict stays its own (out of #21's scope); as it never runs on `main`, no `main`-scoped cache exists. Release not gated on a check, and `release-please` gets `secrets: inherit`. Commitlint inlined to relax `subject-case`, no timeout. `build.yml`: manual ACR build with `setup-qemu-action` (amd64 only). | — |
+| layout (`2fc9b5b`) | staging image (hand-rolled; shared `staging-image` planned, #30) | nothing | — | Predates this repo. `release.yaml`: amd64 + arm64 under QEMU with `GH_TOKEN` as build-arg, then `update-staging` into knkcms/deploy; no timeouts. PR-only CI with `--build-arg GH_TOKEN`, no concurrency or timeouts. UI package by hand-pushed `layout-ui-v*` tag. | #30 |
+| deploy (`8f7c4a5`) | — (deploy repo) | `argocd-rendering-check` | `@v1` | Own `core-services-values` validator job, no timeout. No concurrency. | — |
+| knkeditor (`76946a0`) | npm packages via changesets | nothing | — | Not a caller: Node/TypeScript. Own CI and release, with concurrency, no timeouts. | — |
+| knkcms-go (`94e5868`) | release-please (Go module) | nothing | — | Predates this repo: Go library with its own CI (commit check, lint, test, build) and release-please; no concurrency or timeouts. | — |

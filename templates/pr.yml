@@ -1,0 +1,59 @@
+# Caller template: the PR suite. The same file for both publish models
+# (release and staging image) — copy it to .github/workflows/ci.yml in the
+# caller, fill in the <placeholders>, delete the inputs you do not need.
+# docs/adopting.md walks through every step; README.md documents every input.
+#
+# What this wiring gets right, and why it must stay this way:
+# - `pull_request` only. `push: main` runs the merge check instead, from the
+#   `main` template of your publish model — never this suite a second time.
+# - One concurrency group per workflow and PR, so a new push to a PR cancels
+#   its superseded run. cancel-in-progress is an expression rather than
+#   `true` so the block is identical in every template: it is true only on
+#   `pull_request`, so the same block can never cancel a run on `main`.
+# - `@v1`, never a SHA or `@main` (ADR 0003).
+# - No `timeout-minutes` here: GitHub rejects it on a job that calls a
+#   reusable workflow; go-service-ci's own jobs carry theirs.
+#
+# The check to wait for (and, where the plan allows, to require in branch
+# protection — ADR 0002) is `ci / ci-ok`, the suite verdict. Keep the job
+# named `ci` so it keeps that name.
+name: CI
+on:
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    uses: knkcs/workflows/.github/workflows/go-service-ci.yml@v1
+    with:
+      mode: pr-suite
+      # Keep these three identical in the `main` template's merge check: they
+      # make up the Go cache key, and the merge check on `main` is what warms
+      # the cache every PR starts from.
+      go-version-file: go.mod
+      working-directory: .
+      runs-on: ubuntu-latest
+      # testcontainers (Docker in the job) or services (Postgres + Redis).
+      test-mode: testcontainers
+      # The layout inputs. Delete the ones your repo has no use for.
+      helm-chart: <chart-path>          # e.g. charts/<name>
+      ui-package: <ui-package-path>     # e.g. packages/<name>-ui — a path, not the package name
+      embed-frontend: false             # true when a go:embed of web/dist must compile
+      frontend-build: false             # true to build (and with ui-lint, lint) the `web` workspace
+      check-ent-drift: true             # false when the repo has no internal/ent
+      # Opt-in gates, off by default; turning one on is a deliberate change.
+      check-gofmt: true
+      ui-lint: true
+      ui-test: true
+      # Build the image (amd64, never pushed) when the Dockerfile or its build
+      # inputs change. The Dockerfile must mount CI_TOKEN as the BuildKit
+      # secret `ci_token` (docs/adopting.md, "Dockerfile requirements").
+      image-check: true
+    secrets:
+      CI_TOKEN: ${{ secrets.CI_TOKEN }}

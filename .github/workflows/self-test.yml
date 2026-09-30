@@ -8,6 +8,12 @@ name: Self-test
 # - `actionlint` lints every workflow in .github/workflows/ and every caller
 #   template under templates/ (expressions, input types, runner labels, and —
 #   via the runner's shellcheck — `run:` scripts).
+# - `caller-templates` (tests/caller-templates/run.sh) checks what actionlint
+#   cannot see across the `@v1` boundary: every input and secret a template
+#   passes is one the called workflow here declares (no test-only inputs), every
+#   call is pinned `@v1`, runs cancel on PRs and queue on `main`, and a `main`
+#   template gates everything on the merge check — the release one gating
+#   release-please on it and each publish job on release-please's outputs.
 # - `workflow-timeouts` (tests/workflow-timeouts/run.sh) proves every job
 #   declares `timeout-minutes` with the agreed defaults, so no job can run to
 #   GitHub's 6-hour limit again.
@@ -95,6 +101,16 @@ jobs:
         run: python3 -c 'import yaml' 2>/dev/null || python3 -m pip install --user pyyaml
       - name: Check every job declares its timeout
         run: bash tests/workflow-timeouts/run.sh
+
+  caller-templates:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - name: Ensure PyYAML
+        run: python3 -c 'import yaml' 2>/dev/null || python3 -m pip install --user pyyaml
+      - name: Check the caller templates against the workflows they call
+        run: bash tests/caller-templates/run.sh
 
   rendering-check:
     runs-on: ubuntu-latest
