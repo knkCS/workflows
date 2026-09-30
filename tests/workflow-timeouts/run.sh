@@ -30,11 +30,13 @@ wf_dir = pathlib.Path(sys.argv[1])
 
 # (workflow, job) -> (default minutes, overriding input or None when fixed)
 EXPECTED = {
+    ("go-service-ci.yml", "changes"):              (10, None),
     ("go-service-ci.yml", "backend"):              (10, None),
     ("go-service-ci.yml", "test-testcontainers"):  (40, "test-timeout-minutes"),
     ("go-service-ci.yml", "test-services"):        (40, "test-timeout-minutes"),
     ("go-service-ci.yml", "ui"):                   (15, "ui-timeout-minutes"),
     ("go-service-ci.yml", "helm"):                 (10, None),
+    ("go-service-ci.yml", "ci-ok"):                (10, None),
     ("publish-image-chart.yml", "build"):          (30, "build-timeout-minutes"),
     ("publish-image-chart.yml", "merge"):          (10, None),
     ("publish-ui.yml", "publish"):                 (15, "ui-timeout-minutes"),
@@ -54,6 +56,14 @@ for path in sorted(wf_dir.glob("*.yml")):
     for job, spec in (doc.get("jobs") or {}).items():
         key = (path.name, job)
         seen.add(key)
+        # A job that calls a reusable workflow cannot declare timeout-minutes
+        # (GitHub rejects it); the called workflow's own jobs carry theirs and
+        # are checked here too. Only local calls are allowed, so that stays true.
+        if "uses" in spec:
+            if not str(spec["uses"]).startswith("./.github/workflows/"):
+                failures.append(f"{path.name}: job '{job}' calls {spec['uses']}, which this check cannot see into")
+            print(f"  {path.name:28} {job:22} (calls {spec['uses']})")
+            continue
         if "timeout-minutes" not in spec:
             failures.append(f"{path.name}: job '{job}' has no timeout-minutes")
             continue
