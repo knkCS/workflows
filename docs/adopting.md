@@ -68,7 +68,7 @@ everything on the merge check.
 3. **Copy `templates/pr.yml` and `templates/commitlint.yml`.** Fill in the
    `<placeholders>`; delete the inputs you do not need (the README's
    `go-service-ci` input table says what each does). Remove `push: main`
-   from any existing CI workflow — `main` runs the merge check instead.
+   from the existing PR suite workflow — `main` runs the merge check instead.
 4. **Copy your model's `main` template.** It replaces the repo's existing
    release workflow. Pass the merge check exactly the `go-version-file`,
    `working-directory` and `runs-on` the PR suite passes, and the same layout
@@ -124,7 +124,7 @@ public npm (`NPM_TOKEN`, or `GITHUB_TOKEN` for GitHub Packages).
 **Do not pass `CI_TOKEN` to `release-please`.** release-please prefers it over
 `GITHUB_TOKEN` whenever it is present, and with a read-only token its first
 write fails with a masked `Error adding to tree` (statushub hit exactly
-this; odon's token cannot write either). Without it, release-please uses `GITHUB_TOKEN`, which is enough on
+this; odon's release workflow records the same limit). Without it, release-please uses `GITHUB_TOKEN`, which is enough on
 knkCS. The consequence: a release PR opened with `GITHUB_TOKEN` starts no
 `pull_request` workflow, so it gets no PR suite of its own. The merge check
 still runs when it merges, and gates the publish.
@@ -332,22 +332,24 @@ Every `uses:` of this repo — reusable workflow or composite action — is
 
 ## Anti-pattern checklist
 
-Run from the root of the caller. Each command should print nothing; every hit
-is something to remove or replace. They are greps, so read each hit — a
-comment or a disabled line is fine.
+Run from the root of the caller, in bash. They are greps, so they
+over-report: read every hit, and ask whether it is the anti-pattern — a
+comment, or `cancel-in-progress: true` in a workflow that only runs on
+`pull_request`, is fine. A caller that matches its templates prints nothing
+but row 8's `uses:` lines, whose `needs:` you check by eye.
 
 | # | Anti-pattern | Find it | Fix |
 |---|---|---|---|
 | 1 | **QEMU / emulated builds** — `setup-qemu-action`, or `platforms:` with `arm64` on one runner over a Dockerfile that does not cross-compile | `grep -rn 'setup-qemu-action' .github/workflows/` and `grep -rn 'platforms:.*arm64' .github/workflows/` | Publish through `publish-image-chart` (or the staging image workflow); make the Dockerfile cross-compile ([requirements](#dockerfile-requirements)) |
 | 2 | **Hand-rolled build/push** — the caller builds or pushes an image or chart itself | `grep -rnE 'docker/build-push-action\|docker (build\|push)\|buildx (build\|imagetools)\|helm (package\|push)' .github/workflows/` | Publishing: the `main` template of your model. A PR-time image build: `image-check: true` in the PR suite |
-| 3 | **Token as build-arg** — `CI_TOKEN`/`GH_TOKEN`/`NPM_TOKEN` handed to a build as an argument, or declared as `ARG`/`ENV` in a Dockerfile | `grep -rnE -A6 'build-args:\|--build-arg' .github/workflows/ \| grep -i token` and `grep -nE '^\s*(ARG\|ENV)\s+\S*TOKEN' $(find . -name 'Dockerfile*' -not -path './node_modules/*')` | BuildKit secret `ci_token` and a `RUN --mount=type=secret,id=ci_token` ([requirements](#dockerfile-requirements)) |
-| 4 | **SHA or `@main` pins** of this repo | `grep -rniE 'knkcs/workflows/[^ ]+@' .github/workflows/ \| grep -v '@v1\s*$'` | `@v1` ([policy](#pinning-v1-only)) |
+| 3 | **Token as build-arg** — `CI_TOKEN`/`GH_TOKEN`/`NPM_TOKEN` handed to a build as an argument, or declared as `ARG`/`ENV` in a Dockerfile | `grep -rnE -A6 'build-args:\|--build-arg' .github/workflows/ \| grep -i token` and `find . -name 'Dockerfile*' -not -path './node_modules/*' -exec grep -nHE '^\s*(ARG\|ENV)\s+\S*TOKEN' {} +` | BuildKit secret `ci_token` and a `RUN --mount=type=secret,id=ci_token` ([requirements](#dockerfile-requirements)) |
+| 4 | **SHA or `@main` pins** of this repo | `grep -rniE 'knkcs/workflows/[^ ]+@' .github/workflows/ \| grep -vE '@v1(\s\|$)'` | `@v1` ([policy](#pinning-v1-only)) |
 | 5 | **Missing timeouts** — a job that runs steps without `timeout-minutes` (a `uses:` job cannot have one; its called jobs do) | `python3 -c "import glob,yaml;[print(f,j) for f in glob.glob('.github/workflows/*.y*ml') for j,s in (yaml.safe_load(open(f)).get('jobs') or {}).items() if 'uses' not in s and 'timeout-minutes' not in s]"` | `timeout-minutes:` on every such job: 10 for small jobs, the class defaults in the README for the rest |
 | 6 | **No concurrency, or cancelling on `main`** | `grep -L '^concurrency:' .github/workflows/*.y*ml` and `grep -rn 'cancel-in-progress: true' .github/workflows/` | The templates' concurrency block, verbatim |
 | 7 | **The PR suite again on `push: main`** — a `go-service-ci` call in a workflow triggered by `push` without `mode: merge-check` | `grep -ln 'go-service-ci' .github/workflows/* \| xargs grep -ln 'push:' \| xargs grep -L 'mode: merge-check'` | `pull_request` only in `ci.yml`; `main` runs the merge check from the `main` template |
 | 8 | **Release not gated on the merge check** — a `release-please` call without `needs:` on the merge check, or in a workflow of its own | `grep -rn -B2 -A2 'release-please.yml@' .github/workflows/` and look for the `needs:` | The release `main` template |
 | 9 | **Publishing from a tag-triggered workflow** that expects release-please's tags (they are created with `GITHUB_TOKEN` and trigger nothing) | `grep -rn -A3 'tags:' .github/workflows/` | Publish jobs gated on release-please's outputs in `main.yml` |
-| 10 | **`CI_TOKEN` passed to release-please** (directly or by `secrets: inherit`) | `grep -rn -A4 'release-please.yml@' .github/workflows/ \| grep -E 'secrets'` | No secrets on that job ([`CI_TOKEN`](#the-ci_token-secret)) |
+| 10 | **`CI_TOKEN` passed to release-please** (directly or by `secrets: inherit`) | `grep -rn -A4 'release-please.yml@' .github/workflows/ \| grep -E '^\S+-[0-9]+-\s*secrets:'` | No secrets on that job ([`CI_TOKEN`](#the-ci_token-secret)) |
 | 11 | **Test-only inputs** in a caller | `grep -rnE 'test-changed-files\|test-soft-fail' .github/workflows/` | Delete them — they exist for this repo's self-test only |
 
 ## Adoption status
@@ -362,11 +364,16 @@ Columns: the **publish model** as the repo does it today; the shared
 **workflows** and actions it uses; its **pin**; the **notes** list what is
 hand-rolled and why, and what the anti-pattern checklist finds.
 
+Not listed: repos with no workflows of their own and outside #21's analysis
+(knkCS claude-agent-infra, author-portal), and repos with no push since early
+August 2026 (knkCS image-to-formula, compare-xml, guardian*, reel,
+doc-converter; knkcms knkcms-seed and the older repos).
+
 ### knkCS
 
 | Repo | Publish model | Uses | Pin | Notes | Ticket |
 |---|---|---|---|---|---|
-| statushub (`82311ba`) | release (image + chart, UI package) | `go-service-ci`, `commitlint`, `release-please`, `publish-image-chart` (also a manual dispatch), `publish-ui` | `@v1` | Nothing hand-rolled. CI runs the full suite on `push: main` too; release is a separate workflow, not gated on any check; no concurrency anywhere. | #29 (pilot) |
+| statushub (`82311ba`) | release (image + chart, UI package) | `go-service-ci`, `commitlint`, `release-please`, `publish-image-chart` (also a manual dispatch), `publish-ui` | `@v1` | Nothing hand-rolled. The PR suite runs again in full on `push: main`; release is a separate workflow, not gated on any check; no concurrency anywhere. | #29 (pilot) |
 | taskhub (`cb62ee2`) | release (UI package) + an image and chart pushed on every push to `main` | `go-service-ci`, `release-please`, `publish-ui`; actions `configure-private-modules`, `setup-go-node` | `go-service-ci` at SHA `9624529`, the rest `@v1` | SHA pin from the false "undeclared inputs are ignored" belief. Hand-rolled `docker` job pushes `:latest` + SHA image and chart on each push to `main`, nobody consumes it, `GH_TOKEN` as build-arg, no timeout. `scope-check` is repo-specific (entscope) and stays. Full suite on `push: main`; no CI concurrency. | #32 |
 | mediahub (`6e32f85`) | release (UI package) + an image and chart pushed on every push to `main` | `go-service-ci`, `release-please`, `publish-ui` | `@v1` | Hand-rolled `publish.yml`: amd64 + arm64 under QEMU, `GH_TOKEN` as build-arg, no timeout — the five 6-hour hangs of September 2026. Full suite on `push: main`; no CI concurrency. | #32 |
 | flowhub (`73ca502`) | UI package by hand-pushed `flowhub-ui-v*` tag; no release-please, no image publish | `go-service-ci`, `publish-ui` | `@v1` | `proto` job (buf lint + gen drift — the shared workflow knows no buf) stays. `image` job builds the image on every PR (BuildKit secret, correctly), no timeout → `image-check`. Full suite on `push: main`; no concurrency. | #33 |
@@ -375,7 +382,7 @@ hand-rolled and why, and what the anti-pattern checklist finds.
 | authorhub (`4afd9ee`) | release (image + chart, UI package) | `go-service-ci`, `commitlint`, `release-please`, `publish-image-chart` (also manual), `publish-ui` | `@v1` | Own `collisions`, `modules` (gen module) and `frontend` jobs, none with a timeout. Release not gated, no concurrency. | #34 |
 | blueprinthub (`5289c7e`) | release (image + chart, UI package) | `go-service-ci`, `commitlint`, `release-please`, `publish-image-chart`, `publish-ui`; actions `configure-private-modules`, `setup-go-node` | `go-service-ci` at SHA `7d6dc74` (= `v1` today), the rest `@v1` | SHA pin from the false "undeclared inputs are ignored" belief. Own `web-test` (`ui-test` covers `ui-package` only, #19), `scope-check` and `gen-module` jobs, none with a timeout. Release queues but is not gated. | #34 |
 | versionkit (`9fcc922`) | release (Go module tag only) | `go-service-ci`, `commitlint`, `release-please` | `@v1` | Nothing hand-rolled. Release queues but is not gated; full suite on `push: main`. | #34 |
-| odon (`d44ba49`) | release (image + chart); UI package by hand-pushed `odon-ui-v*` tag | `release-please`, `publish-image-chart` | `@main` | `@main` left over from validating the native-arm build. CI is its own (services-mode tests need env `go-service-ci` lacks), no concurrency or timeouts, full run on `push: main`. `publish-odon-ui.yml` is a hand-rolled tag-triggered npm publish that `publish-ui` could do. | #35 |
+| odon (`d44ba49`) | release (image + chart); UI package by hand-pushed `odon-ui-v*` tag | `release-please`, `publish-image-chart` | `@main` | `@main` left over from validating the native-arm build. Its PR checks are its own workflow (services-mode tests need env `go-service-ci` lacks), no concurrency or timeouts, full run on `push: main`. `publish-odon-ui.yml` is a hand-rolled tag-triggered npm publish that `publish-ui` could do. | #35 |
 | fieldkit (`aaf9803`) | npm package (`@knkcs/fieldkit`) by hand-pushed `v*` tag; Go module in `go/` | `go-service-ci`, `commitlint`; action `configure-private-modules` | `@v1` | `go.yml` passes `working-directory`, which `v1` does not declare yet, so every Go run is a `startup_failure` until `v1` moves. Its module also needs private `knkcms/knkeditor/go`, outside the `GOPRIVATE=github.com/knkcs/*` the shared workflow sets. Own Node `ci.yml`, publish and Storybook workflows, none with timeouts. | #35 |
 | commons (`250e08a`) | — (Go library) | nothing | — | No CI at all. | #35 |
 | platform-deploy (`6987c6a`) | — (deploy repo) | `argocd-rendering-check` | `@v1` | Thin caller. No concurrency. | — |

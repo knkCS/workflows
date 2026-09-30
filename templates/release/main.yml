@@ -1,7 +1,7 @@
 # Caller template: `main` for the release publish model (knkCS). Copy it to
 # .github/workflows/main.yml in the caller, fill in the <placeholders>, and
 # delete the publish job you do not need. It replaces a caller's separate
-# release workflow and the `push: main` trigger of its CI: the PR suite
+# release workflow and the `push: main` trigger of its PR suite workflow: the PR suite
 # (templates/pr.yml) runs on pull requests only. docs/adopting.md walks
 # through every step.
 #

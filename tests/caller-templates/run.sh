@@ -16,10 +16,12 @@
 #   4. the PR suite runs go-service-ci in `pr-suite` mode on `pull_request`
 #      only, and a `main` template runs the merge check on `push: main` only,
 #      with every other job depending on it, directly or through another job;
-#   5. the release `main` template gates release-please on the merge check and
-#      each publish job on a release-please output, and its merge check passes
-#      the same go-version-file, working-directory and runs-on as the PR suite,
-#      so the caches the merge check saves on `main` are the ones PRs restore.
+#   5. a `main` template's merge check sees the same go-version-file,
+#      working-directory and runs-on as the PR suite, so the caches it saves on
+#      `main` are the ones PRs restore, and the same layout inputs, so it checks
+#      the same tree;
+#   6. the release `main` template gates release-please on the merge check and
+#      each publish job on a release-please output.
 #
 # Requires: python3 with PyYAML.
 set -euo pipefail
@@ -44,6 +46,8 @@ TEST_ONLY_INPUTS = {"test-changed-files", "test-soft-fail"}
 CALL = re.compile(r"^knkcs/workflows/\.github/workflows/([A-Za-z0-9_.-]+\.ya?ml)@(.+)$", re.I)
 CANCEL = "${{ github.event_name == 'pull_request' }}"
 CACHE_KEYS = ("go-version-file", "working-directory", "runs-on")
+LAYOUT_KEYS = ("helm-chart", "ui-package", "embed-frontend", "frontend-build",
+               "check-ent-drift", "check-gofmt")
 
 failures = []
 def fail(where, msg):
@@ -63,10 +67,13 @@ def called(workflow):
     call = trigger(doc).get("workflow_call") or {}
     return call.get("inputs") or {}, call.get("secrets") or {}
 
+def needs_of(spec):
+    needs = spec.get("needs") or []
+    return [needs] if isinstance(needs, str) else needs
+
 def ancestors(jobs, name, seen=None):
     seen = set() if seen is None else seen
-    needs = jobs.get(name, {}).get("needs") or []
-    for n in [needs] if isinstance(needs, str) else needs:
+    for n in needs_of(jobs.get(name, {})):
         if n not in seen:
             seen.add(n)
             ancestors(jobs, n, seen)
@@ -140,8 +147,12 @@ for rel, path in templates.items():
                 fail(where, f"job '{job}' omits {workflow}'s required secret '{name}'")
 
 def calls(rel, workflow):
-    return {j: s for j, s in (docs.get(rel, {}).get("jobs") or {}).items()
-            if CALL.match(str(s.get("uses", ""))) and CALL.match(s["uses"]).group(1) == workflow}
+    matches = {j: CALL.match(str(s.get("uses", ""))) for j, s in (docs.get(rel, {}).get("jobs") or {}).items()}
+    return {j: docs[rel]["jobs"][j] for j, m in matches.items() if m and m.group(1) == workflow}
+
+def merge_checks(rel):
+    return [j for j, s in calls(rel, "go-service-ci.yml").items()
+            if (s.get("with") or {}).get("mode") == "merge-check"]
 
 # 4a. The PR suite.
 pr_jobs = {}
@@ -166,8 +177,7 @@ for rel in docs:
     if set(on) != {"push"} or branches != ["main"]:
         fail(where, "must trigger on push to main only")
     jobs = docs[rel].get("jobs") or {}
-    gates = [j for j, s in calls(rel, "go-service-ci.yml").items()
-             if (s.get("with") or {}).get("mode") == "merge-check"]
+    gates = merge_checks(rel)
     if len(gates) != 1:
         fail(where, "must call go-service-ci.yml with mode: merge-check exactly once")
         continue
@@ -175,28 +185,27 @@ for rel in docs:
     for job in jobs:
         if job != gate and gate not in ancestors(jobs, job):
             fail(where, f"job '{job}' does not depend on the merge check '{gate}'")
-    # 5. The same cache-relevant inputs as the PR suite, compared as the
+    # 5. The same cache and layout inputs as the PR suite, compared as the
     # workflow sees them (an omitted input is its default).
     defaults = {k: (v or {}).get("default") for k, v in called("go-service-ci.yml")[0].items()}
-    for pj, pspec in pr_jobs.items():
+    for pspec in pr_jobs.values():
         pw, mw = pspec.get("with") or {}, jobs[gate].get("with") or {}
-        for key in CACHE_KEYS:
+        for key in CACHE_KEYS + LAYOUT_KEYS:
             pv, mv = pw.get(key, defaults.get(key)), mw.get(key, defaults.get(key))
             if pv != mv:
-                fail(where, f"merge check passes {key}={mv!r}, PR suite {pv!r}: cache keys would differ")
+                why = "cache keys would differ" if key in CACHE_KEYS else "it would check a different tree"
+                fail(where, f"merge check passes {key}={mv!r}, PR suite {pv!r}: {why}")
 
-# 5. The release model: release-please behind the merge check, publishing behind release-please.
+# 6. The release model: release-please behind the merge check, publishing behind release-please.
 if RELEASE_MAIN in docs:
     where = f"templates/{RELEASE_MAIN}"
     jobs = docs[RELEASE_MAIN].get("jobs") or {}
     rp = list(calls(RELEASE_MAIN, "release-please.yml"))
-    gate = [j for j, s in calls(RELEASE_MAIN, "go-service-ci.yml").items()
-            if (s.get("with") or {}).get("mode") == "merge-check"]
+    gate = merge_checks(RELEASE_MAIN)
     if len(rp) != 1:
         fail(where, "must call release-please.yml exactly once")
     elif gate:
-        needs = jobs[rp[0]].get("needs") or []
-        if gate[0] not in ([needs] if isinstance(needs, str) else needs):
+        if gate[0] not in needs_of(jobs[rp[0]]):
             fail(where, f"release-please must `needs:` the merge check '{gate[0]}' directly")
         for wf in ("publish-image-chart.yml", "publish-ui.yml"):
             pubs = calls(RELEASE_MAIN, wf)

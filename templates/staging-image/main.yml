@@ -38,8 +38,15 @@ jobs:
       go-version-file: go.mod
       working-directory: .
       runs-on: ubuntu-latest
-      # The same layout inputs as the PR suite, e.g.:
-      helm-chart: charts/<service>
+      # The same layout inputs as templates/pr.yml, so the merge check vets,
+      # lints and typechecks the same tree. The PR-suite-only inputs (test-mode,
+      # ui-lint, ui-test, image-check) have no effect here and are left out.
+      helm-chart: <chart-path>          # e.g. charts/<service>
+      ui-package: <ui-package-path>     # e.g. packages/<service>-ui
+      embed-frontend: false
+      frontend-build: false
+      check-ent-drift: true
+      check-gofmt: true
     secrets:
       CI_TOKEN: ${{ secrets.CI_TOKEN }}
 
