@@ -23,12 +23,19 @@ on:
       # repo whose go.mod is go/go.mod). Every `run:` step of the Go job runs
       # there; `go-version-file` and `helm-chart` stay root-relative.
       working-directory:   { type: string, default: "." }
+      # Opt-in image check: when the image change area changed, the `image`
+      # job builds the image (amd64 only, cached, never pushed). The build
+      # context is `image-context`, relative to the repo root, and the
+      # Dockerfile is `<image-context>/Dockerfile`.
+      image-check:         { type: boolean, default: false }
+      image-context:       { type: string, default: "." }
       # Job timeouts, so a hang costs minutes rather than GitHub's 6-hour limit.
       # The Go job's 40 sits above the 30m `test-timeout` default, so go test's
       # own timeout (with its stack dump) fires first; raise both together.
       # `changes` and `ci-ok` are fixed at 10.
       test-timeout-minutes: { type: number, default: 40 }
       ui-timeout-minutes:   { type: number, default: 15 }
+      image-timeout-minutes: { type: number, default: 30 }  # as each publish-image-chart build leg
       # Extra paths that are never docs (whitespace/newline-separated shell
       # globs over the whole path; `*` crosses `/`): repo-specific Markdown that
       # is really an input to code. See scripts/change-areas.sh.
@@ -64,8 +71,9 @@ jobs:
   # `ui-package` as UI, so a module in go/ or a UI package outside packages/
   # does not fall into "no area" and run everything.
   #
-  # The `go` job runs when the Go area is on, `ui` when the UI area is; a
-  # docs-only PR (`docs-only`, kept for the log) therefore runs neither.
+  # The `go` job runs when the Go area is on, `ui` when the UI area is, and
+  # `image` (with `image-check` on) when the image area is; a docs-only PR
+  # (`docs-only`, kept for the log) therefore runs none of them.
   changes:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -341,6 +349,47 @@ jobs:
         working-directory: ${{ inputs.ui-package }}
         run: npx tsc --noEmit
 
+  # The image check: build the caller's image the way publish-image-chart's
+  # amd64 leg does, so a change that breaks the Dockerfile fails on the PR
+  # rather than at release time. Opt-in (`image-check`), and runs only when
+  # the image change area changed (Dockerfile*, .dockerignore, docker/ — or a
+  # file in no area, which counts as every area). A Go- or UI-only change does
+  # not run it: the `go` and `ui` jobs check the code the image compiles.
+  #
+  # - amd64 only — the deployment target, on an amd64 runner, so a native
+  #   build (ADR 0001). The arm64 developer platform is built by the publish
+  #   workflow's native arm64 leg; a PR check does not pay for it twice.
+  # - Never pushed, and no registry login: `push: false` with buildx's
+  #   docker-container driver leaves the result in the build cache only.
+  # - CI_TOKEN is a BuildKit secret (id=ci_token, what every caller's
+  #   Dockerfile mounts, as in publish-image-chart), never a build-arg, so the
+  #   PAT cannot land in image layers or `docker history`.
+  # - The GHA cache deliberately SHARES publish-image-chart's `amd64` scope.
+  #   GitHub's cache is ref-isolated: a PR restores caches of its base branch
+  #   (so it starts warm from the last publish on main) but saves only under
+  #   its own `refs/pull/N/merge`, which neither main nor another PR can read.
+  #   So sharing warms the check without a PR build ever feeding a release; a
+  #   scope of its own would start every PR cold. The cost is cache storage:
+  #   PR entries count towards the repo's cache quota until evicted.
+  image:
+    needs: changes
+    if: ${{ inputs.image-check && needs.changes.outputs.image == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.image-timeout-minutes }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: docker/setup-buildx-action@v3
+      - name: Build image (amd64, not pushed)
+        uses: docker/build-push-action@v7
+        with:
+          context: ${{ inputs.image-context }}
+          platforms: linux/amd64
+          push: false
+          secrets: |
+            ci_token=${{ secrets.CI_TOKEN }}
+          cache-from: type=gha,scope=amd64
+          cache-to: type=gha,mode=max,scope=amd64
+
   # The suite verdict: the one check a branch-protection rule should require.
   # `always()` makes it run — and report — whatever happened above, including
   # a cancelled run; a required check that is skipped would read as passing.
@@ -350,7 +399,7 @@ jobs:
   # in the same `needs` context. Logic in scripts/suite-verdict.sh, tested by
   # tests/change-areas/run.sh. A new job in this workflow MUST be added here.
   ci-ok:
-    needs: [changes, go, ui]
+    needs: [changes, go, ui, image]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 10

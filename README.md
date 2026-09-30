@@ -24,8 +24,8 @@ touches a workflow, a script or a test it runs actionlint over every workflow
 (configured by `.github/actionlint.yaml`), `tests/workflow-timeouts/run.sh`
 (every job declares the agreed timeout), and each engine script's fixture
 self-test (`tests/rendering-check/run.sh`, `tests/change-areas/run.sh`). It
-also calls `go-service-ci.yml` from the PR's own commit with four fixed change
-sets — docs-only, Go-only (in both test modes) and UI-only — against the
+also calls `go-service-ci.yml` from the PR's own commit with five fixed change
+sets — docs-only, Go-only (in both test modes), UI-only and image-only — against the
 fixtures in `tests/go-service-ci/`, and checks that each ran exactly the jobs
 its change areas need. The root `package.json` exists only for that UI
 fixture.
@@ -43,6 +43,7 @@ slow but healthy run is plausible, a caller can raise the timeout with a
 |---|---|---|---|
 | `go-service-ci.yml` | `test-timeout-minutes` | `40` | `go` |
 | `go-service-ci.yml` | `ui-timeout-minutes` | `15` | `ui` |
+| `go-service-ci.yml` | `image-timeout-minutes` | `30` | `image` |
 | `publish-image-chart.yml` | `build-timeout-minutes` | `30` | each `build` leg (amd64, arm64) |
 | `publish-ui.yml` | `ui-timeout-minutes` | `15` | `publish` |
 | `argocd-rendering-check.yml` | `render-timeout-minutes` | `10` | `render` |
@@ -60,10 +61,11 @@ files into **change areas** — docs, Go, UI, image — and ends with `ci-ok`, t
 
 - **Each PR runs only the jobs its change areas need.** The `go` job runs
   when the Go area changed, the `ui` job when the UI area did (and a
-  `ui-package` is set). So a UI-only PR skips the Go suite, a Go-only PR skips
-  `npm ci` and the UI build, and a docs-only PR runs only `changes` and
-  `ci-ok`, green. (An image-only PR also runs neither: no job here builds the
-  image yet.)
+  `ui-package` is set), the `image` job when the image area did (and
+  `image-check` is on). So a UI-only PR skips the Go suite, a Go-only PR skips
+  `npm ci`, the UI build and the image build, an image-only PR builds only the
+  image, and a docs-only PR runs only `changes` and `ci-ok`, green. (Without
+  `image-check`, an image-only PR runs no check but `ci-ok`.)
 - **One Go job.** `go` runs every Go check on one runner — ent drift, gofmt,
   vet and helm lint first, so they fail within about a minute, then the
   tests — so Go setup and the module download happen once. Both test modes
@@ -128,14 +130,17 @@ the classifier; its fixture self-test is `tests/change-areas/run.sh`.
 | `check-gofmt` | boolean | `false` | Fail the `go` job if any **tracked** Go file under `working-directory` is not gofmt-clean |
 | `runs-on` | string | `ubuntu-latest` | Runner label for the `go` job (the other jobs stay on `ubuntu-latest`). `services` mode needs a Linux runner with Docker |
 | `working-directory` | string | `.` | Where the Go module lives, relative to the repo root (e.g. `go`). Every command of the `go` job runs there; `go-version-file` and `helm-chart` stay root-relative, so pass e.g. `go-version-file: go/go.mod` too |
+| `image-check` | boolean | `false` | Build the image in the `image` job when the image change area changed: amd64 only, GHA-cached, never pushed, `CI_TOKEN` as the BuildKit secret `ci_token` (see below) |
+| `image-context` | string | `.` | Build context for `image-check`, relative to the repo root; the Dockerfile is `<image-context>/Dockerfile` |
 | `test-timeout-minutes` | number | `40` | Job timeout for the `go` job; keep it above `test-timeout` (see [Job timeouts](#job-timeouts)) |
 | `ui-timeout-minutes` | number | `15` | Job timeout for the `ui` job |
+| `image-timeout-minutes` | number | `30` | Job timeout for the `image` job |
 | `docs-exclude` | string | `""` | Extra paths that are never docs (see [change areas](#go-service-ciyml-change-areas-and-the-suite-verdict)) |
 | `test-changed-files` | string | `""` | **Test-only**, for this repo's self-test: replaces the PR's changed-file list. Callers never set it |
 
-`check-gofmt`, `ui-lint`, `ui-test` and `npm-github-packages` are opt-in and
-default to off, so enabling them is always a deliberate change to a caller's CI.
-Four things to know before turning them on:
+`check-gofmt`, `ui-lint`, `ui-test`, `npm-github-packages` and `image-check`
+are opt-in and default to off, so enabling them is always a deliberate change
+to a caller's CI. Five things to know before turning them on:
 
 - **`check-gofmt` checks tracked files and fails on an unparseable one.** It lists
   them with `git ls-files`, so `node_modules/` and any other worktrees in the
@@ -161,6 +166,18 @@ Four things to know before turning them on:
   `read:packages` for the scopes the lockfile pulls. Without `ui-package` the
   input is inert — no job runs `npm ci` — and unlike the gates above it is not
   refused: an unused credential misleads no one, where a skipped gate lies.
+- **`image-check` builds only what a PR can break, only when it can break it.**
+  The `image` job runs when the image area changed — `Dockerfile*`,
+  `.dockerignore`, `docker/**`, or a file in no area — not on a Go- or UI-only
+  change, which the `go` and `ui` jobs already check. It builds for
+  `linux/amd64` only, natively ([ADR 0001](docs/adr/0001-arm64-is-a-developer-platform-built-natively.md));
+  arm64 is left to `publish-image-chart`'s native leg. Nothing is pushed and no
+  registry login happens. `CI_TOKEN` is passed as the BuildKit secret
+  `ci_token` — never a build-arg — so the Dockerfile must mount it as
+  `RUN --mount=type=secret,id=ci_token …`, exactly as `publish-image-chart`
+  requires. The GHA build cache shares `publish-image-chart`'s `amd64` scope:
+  a PR starts warm from the last publish on `main`, and its own cache entries
+  stay under the PR's ref, where no release can read them.
 
 ### `argocd-rendering-check.yml` inputs
 

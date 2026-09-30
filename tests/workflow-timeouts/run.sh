@@ -6,8 +6,9 @@
 #
 #   1. every job declares `timeout-minutes` (a new job without one fails here);
 #   2. each shared workflow's jobs resolve to the agreed defaults — 40 for Go
-#      tests (above go-service-ci's 30m `test-timeout`), 30 per image build leg,
-#      15 for UI, 10 for everything else;
+#      tests (above go-service-ci's 30m `test-timeout`), 30 per image build
+#      (each publish leg and go-service-ci's `image` check), 15 for UI, 10 for
+#      everything else;
 #   3. the jobs where a slow but healthy run is plausible take their timeout
 #      from a `number` input, so a caller can raise it; the rest are fixed.
 #
@@ -33,6 +34,7 @@ EXPECTED = {
     ("go-service-ci.yml", "changes"):              (10, None),
     ("go-service-ci.yml", "go"):                   (40, "test-timeout-minutes"),
     ("go-service-ci.yml", "ui"):                   (15, "ui-timeout-minutes"),
+    ("go-service-ci.yml", "image"):                (30, "image-timeout-minutes"),
     ("go-service-ci.yml", "ci-ok"):                (10, None),
     ("publish-image-chart.yml", "build"):          (30, "build-timeout-minutes"),
     ("publish-image-chart.yml", "merge"):          (10, None),
