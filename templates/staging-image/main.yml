@@ -15,9 +15,11 @@ on:
   push:
     branches: [main]
 
-# `main` queues and never cancels: a cancelled run can leave an image pushed
-# and the deploy repo not updated. (The expression is the shared rule of every
-# caller template; it is true only for pull_request events.)
+# `main` never cancels a running publish: a cancelled run can leave an image
+# pushed and the deploy repo not updated. (GitHub still replaces a run that is
+# only pending with the newer one, which is harmless: staging goes straight to
+# the newer SHA.) The expression is the shared rule of every caller template;
+# it is true only for pull_request events.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
