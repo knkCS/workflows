@@ -1,0 +1,3 @@
+# Callers pin `@v1` only — never a SHA or `@main`
+
+Every caller references this repo's workflows and actions at the moving `@v1` tag, so a fix here (e.g. the September 2026 cost fixes) reaches every repo when the tag moves, without ten hand migrations. SHA pins look safer but are not hermetic — `go-service-ci` itself calls its composite actions at `@v1` — and the reason given for them ("an undeclared input is silently ignored") is false: an undeclared input fails the run at startup. The risk of a moving tag is handled instead by piloting a change on one caller (statushub) against a branch ref before `v1` is moved, and by reserving breaking changes for `v2`.
