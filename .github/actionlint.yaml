@@ -11,3 +11,8 @@ paths:
       # Same as above: the `changes` and `ci-ok` jobs fetch this repo's scripts
       # at `job.workflow_sha`.
       - 'property "workflow_sha" is not defined in object type \{check_run_id: number;'
+  .github/workflows/staging-image.yml:
+    ignore:
+      # Same as above: the `update-staging` job fetches this repo's scripts at
+      # `job.workflow_sha`.
+      - 'property "workflow_sha" is not defined in object type \{check_run_id: number;'
