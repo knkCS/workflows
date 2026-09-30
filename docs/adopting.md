@@ -15,8 +15,9 @@ decisions behind the rules are ADRs [0001](adr/0001-arm64-is-a-developer-platfor
 
 > **Before `v1` moves.** The templates call the PR suite and merge check that
 > `go-service-ci` has on `main` of this repo: `mode`, change areas, `ci-ok`,
-> `working-directory`, `image-check` and the timeout inputs. `v1` moves to
-> them only after the statushub pilot (#29) is green. Until then, `v1` does
+> `working-directory`, `image-check` and the timeout inputs — and the
+> staging image workflow exists only there. `v1` moves to them only after the
+> pilots are green (statushub, #29; layout, #30). Until then, `v1` does
 > not declare those inputs and a copied template fails at startup (an
 > undeclared input is an error, not ignored — ADR 0003). Check with
 > `git ls-remote https://github.com/knkcs/workflows refs/tags/v1` against the
@@ -29,7 +30,7 @@ decisions behind the rules are ADRs [0001](adr/0001-arm64-is-a-developer-platfor
 | [`templates/pr.yml`](../templates/pr.yml) | `.github/workflows/ci.yml` | both publish models | The PR suite: `go-service-ci` on `pull_request`, superseded runs cancelled |
 | [`templates/commitlint.yml`](../templates/commitlint.yml) | `.github/workflows/commitlint.yml` | both publish models | Conventional-commit linting on `pull_request` |
 | [`templates/release/main.yml`](../templates/release/main.yml) | `.github/workflows/main.yml` | the release model | On `push: main`: merge check → release-please → `publish-image-chart` / `publish-ui` |
-| `templates/staging-image/main.yml` | `.github/workflows/main.yml` | the staging image model | Added by #28 — see [Staging image](#staging-image) |
+| [`templates/staging-image/main.yml`](../templates/staging-image/main.yml) | `.github/workflows/main.yml` | the staging image model | On `push: main`: merge check → `staging-image` |
 
 The PR suite template sits at the top of `templates/`, not under a publish
 model, because it is the same file for both: what differs between the models
@@ -75,7 +76,8 @@ everything on the merge check.
    `check-ent-drift`, `check-gofmt`), so it checks the same tree and warms the
    caches PRs restore.
 5. **Configure release-please** (release model,
-   [below](#release-please-configuration)).
+   [below](#release-please-configuration)), or check the deploy repo's
+   staging values file (staging image model, [below](#staging-image)).
 6. **Make the Dockerfile conform** ([below](#dockerfile-requirements)), then
    turn on `image-check` in the PR suite.
 7. **Wait for — and where the plan allows, require — the suite verdict**
@@ -113,7 +115,7 @@ What it needs access to — **read-only**, unless noted:
 | `go-service-ci` with `npm-github-packages` | `npm ci` from `npm.pkg.github.com` | `read:packages` for every scope the lockfile pulls (GitHub Packages needs a token even for public packages) |
 | `go-service-ci` `image` job, `publish-image-chart` | The Dockerfile's BuildKit secret `ci_token` | Whatever the Dockerfile fetches with it — normally the same module access as above |
 | `argocd-rendering-check` | Charts pulled from private service repos | Contents: read on each of those repos |
-| the staging image workflow (#28) | Committing the SHA into the deploy repo's staging values | Contents: **write** on the deploy repo |
+| `staging-image` | Committing the SHA into the deploy repo's staging values (`update-staging`) | Contents: **write** on the deploy repo (`knkcms/deploy` by default) |
 
 Not used for: pushing images and charts to GHCR (the workflow's own
 `GITHUB_TOKEN`, with `packages: write` granted by the caller) and publishing to
@@ -213,10 +215,37 @@ a mislabelled commit ships a wrong version.
 
 ### Staging image
 
-The knkcms model — a **staging image** tagged with the commit SHA on every
-push to `main`, written into the deploy repo's staging values. The shared
-workflow and `templates/staging-image/main.yml` are added, and documented
-here, by #28.
+The knkcms model. Staging follows `main`: every push to `main` publishes a
+**staging image** tagged with the commit SHA (and `latest`) and points the
+deploy repo's staging values at it — no release, no version.
+
+`templates/staging-image/main.yml` runs on every push to `main`:
+
+```text
+merge-check ──► staging-image ──► publish (image + chart) ──► update-staging (deploy repo)
+```
+
+- **The merge check gates it**, exactly as in the release model: staging never
+  receives a `main` that does not compile.
+- **The build is the release model's.** `staging-image` calls
+  `publish-image-chart` with the SHA as `version`: each architecture on its
+  own native runner (ADR 0001), GHA-cached, merged into one manifest tagged
+  `<sha>` and `latest`. The chart is pushed at the version its `Chart.yaml`
+  declares, since a SHA is no chart version.
+- **The deploy repo** (`deploy-repo`, default `knkcms/deploy`) gets the SHA in
+  the top-level `image.tag` of `staging-values-path` — nothing else in the
+  file — committed as `github-actions[bot]`. The values file must already have
+  an `image.tag`; a run whose SHA is already there commits nothing, and a
+  push race with another service's update is retried on the new tip.
+- **Never cancel on `main`**: a cancelled run can leave the image pushed and
+  staging not pointed at it. The shared concurrency block guarantees it.
+- **A UI package** in a staging-image repo is still released through
+  release-please and `publish-ui` (knkcms/template does); add those jobs
+  behind the merge check as in the release template.
+
+Inputs and the exact deploy-repo edit are in the README's
+[`staging-image.yml`](../README.md#staging-imageyml-the-staging-image-publish-model)
+section.
 
 ## Dockerfile requirements
 
@@ -247,9 +276,9 @@ Every image built by `publish-image-chart`, the `image-check` job of
 - **Build natively, never under emulation** (ADR 0001). Every published image
   includes `linux/arm64` for developers, and arm64 may only come from a native
   build. `publish-image-chart` builds each architecture on a runner of that
-  architecture, so any Dockerfile is native there. A Dockerfile that is built
-  for both architectures on **one** runner (knkcms/template's) must
-  cross-compile: build stages `FROM --platform=$BUILDPLATFORM`, with the
+  architecture, so any Dockerfile is native there. `staging-image` builds through it too.
+  A Dockerfile that is built for both architectures on **one** runner
+  (knkcms/template's hand-rolled release, until #31) must cross-compile: build stages `FROM --platform=$BUILDPLATFORM`, with the
   compiler targeting `$TARGETOS`/`$TARGETARCH`, so only the final stage — which
   runs nothing — is of the target architecture:
 
@@ -362,9 +391,9 @@ hand-rolled and why, and what the anti-pattern checklist finds.
 
 | Repo | Publish model | Uses | Pin | Notes | Ticket |
 |---|---|---|---|---|---|
-| template (`e9add02`) | staging image (hand-rolled) + UI package via release-please | `publish-ui` (GitHub Packages) | `@v1` | `release.yaml` builds amd64 + arm64 cross-compiled on one runner (no QEMU since knkcms/template#232) with `GH_TOKEN`/`NPM_TOKEN` as build-args, then `update-staging` writes the SHA into knkcms/deploy; no timeouts. Own release-please job (custom outputs). Its specialised PR-only CI (change detection, `ci` verdict, concurrency, no timeouts) stays its own — out of #21's scope — and also passes the tokens as build-args. | #31 |
+| template (`e9add02`) | staging image (hand-rolled; shared `staging-image` planned, #31) + UI package via release-please | `publish-ui` (GitHub Packages) | `@v1` | `release.yaml` builds amd64 + arm64 cross-compiled on one runner (no QEMU since knkcms/template#232) with `GH_TOKEN`/`NPM_TOKEN` as build-args, then `update-staging` writes the SHA into knkcms/deploy; no timeouts. Own release-please job (custom outputs). Its specialised PR-only CI (change detection, `ci` verdict, concurrency, no timeouts) stays its own — out of #21's scope — and also passes the tokens as build-args. | #31 |
 | core (`e5cc066`) | release (image + chart) | `release-please`, `publish-image-chart` | `@v1` | Specialised PR-only CI with concurrency, timeouts and a `ci` verdict stays its own (out of #21's scope); as it never runs on `main`, no `main`-scoped cache exists. Release not gated on a check, and `release-please` gets `secrets: inherit`. Commitlint inlined to relax `subject-case`, no timeout. `build.yml`: manual ACR build with `setup-qemu-action` (amd64 only). | — |
-| layout (`2fc9b5b`) | staging image (hand-rolled) | nothing | — | Predates this repo. `release.yaml`: amd64 + arm64 under QEMU with `GH_TOKEN` as build-arg, then `update-staging` into knkcms/deploy; no timeouts. PR-only CI with `--build-arg GH_TOKEN`, no concurrency or timeouts. UI package by hand-pushed `layout-ui-v*` tag. | #30 |
+| layout (`2fc9b5b`) | staging image (hand-rolled; shared `staging-image` planned, #30) | nothing | — | Predates this repo. `release.yaml`: amd64 + arm64 under QEMU with `GH_TOKEN` as build-arg, then `update-staging` into knkcms/deploy; no timeouts. PR-only CI with `--build-arg GH_TOKEN`, no concurrency or timeouts. UI package by hand-pushed `layout-ui-v*` tag. | #30 |
 | deploy (`8f7c4a5`) | — (deploy repo) | `argocd-rendering-check` | `@v1` | Own `core-services-values` validator job, no timeout. No concurrency. | — |
 | knkeditor (`76946a0`) | npm packages via changesets | nothing | — | Not a caller: Node/TypeScript. Own CI and release, with concurrency, no timeouts. | — |
 | knkcms-go (`94e5868`) | release-please (Go module) | nothing | — | Predates this repo: Go library with its own CI (commit check, lint, test, build) and release-please; no concurrency or timeouts. | — |

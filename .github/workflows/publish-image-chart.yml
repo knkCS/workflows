@@ -7,6 +7,10 @@ on:
       version:    { type: string, required: true }    # e.g. 1.2.3 (no leading v)
       ref:        { type: string, required: false, default: '' }  # git ref to build from (defaults to the triggering commit)
       build-timeout-minutes: { type: number, default: 30 }  # per native build leg; `merge` is fixed at 10
+      # Package the chart at the version (and appVersion) its Chart.yaml
+      # declares instead of `version`. For a staging image, whose `version` is
+      # a commit SHA — not a valid chart version (staging-image.yml sets it).
+      keep-chart-version: { type: boolean, default: false }
     secrets:
       CI_TOKEN: { required: true }
 
@@ -78,7 +82,8 @@ jobs:
         run: echo "digest-${{ steps.vars.outputs.arch }}=${{ steps.build.outputs.digest }}" >> "$GITHUB_OUTPUT"
 
   # Assemble the per-arch digests into a single multi-arch manifest under the
-  # release tags, then publish the Helm chart once.
+  # release tags (`version` + `latest`; for a staging image, the commit SHA +
+  # `latest`), then publish the Helm chart once.
   merge:
     needs: build
     runs-on: ubuntu-latest
@@ -113,12 +118,21 @@ jobs:
         run: docker buildx imagetools inspect ${{ steps.vars.outputs.image }}:${{ inputs.version }}
       - uses: azure/setup-helm@v5
       - name: Package and push chart
+        env:
+          KEEP_CHART_VERSION: ${{ inputs.keep-chart-version }}
         run: |
           helm registry login ghcr.io -u ${{ github.actor }} -p ${{ secrets.GITHUB_TOKEN }}
           OWNER=${{ steps.vars.outputs.owner }}
-          # Align the chart version with the released app version.
-          helm package ${{ inputs.chart-path }} --version "${{ inputs.version }}" --app-version "${{ inputs.version }}"
-          helm push "${{ inputs.chart-name }}-${{ inputs.version }}.tgz" "oci://ghcr.io/${OWNER}/charts"
+          if [ "$KEEP_CHART_VERSION" = true ]; then
+            # The chart's own version, as the staging model always published it.
+            CHART_VERSION=$(helm show chart "${{ inputs.chart-path }}" | awk '/^version:/ {print $2}')
+            helm package "${{ inputs.chart-path }}"
+          else
+            # Align the chart version with the released app version.
+            CHART_VERSION="${{ inputs.version }}"
+            helm package ${{ inputs.chart-path }} --version "$CHART_VERSION" --app-version "$CHART_VERSION"
+          fi
+          helm push "${{ inputs.chart-name }}-${CHART_VERSION}.tgz" "oci://ghcr.io/${OWNER}/charts"
           docker buildx imagetools create \
             --tag "ghcr.io/${OWNER}/charts/${{ inputs.chart-name }}:latest" \
-            "ghcr.io/${OWNER}/charts/${{ inputs.chart-name }}:${{ inputs.version }}"
+            "ghcr.io/${OWNER}/charts/${{ inputs.chart-name }}:${CHART_VERSION}"

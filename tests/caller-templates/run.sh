@@ -175,12 +175,15 @@ for rel in docs:
     for job in jobs:
         if job != gate and gate not in ancestors(jobs, job):
             fail(where, f"job '{job}' does not depend on the merge check '{gate}'")
-    # 5. The same cache-relevant inputs as the PR suite.
+    # 5. The same cache-relevant inputs as the PR suite, compared as the
+    # workflow sees them (an omitted input is its default).
+    defaults = {k: (v or {}).get("default") for k, v in called("go-service-ci.yml")[0].items()}
     for pj, pspec in pr_jobs.items():
         pw, mw = pspec.get("with") or {}, jobs[gate].get("with") or {}
         for key in CACHE_KEYS:
-            if pw.get(key) != mw.get(key):
-                fail(where, f"merge check passes {key}={mw.get(key)!r}, PR suite {pw.get(key)!r}: cache keys would differ")
+            pv, mv = pw.get(key, defaults.get(key)), mw.get(key, defaults.get(key))
+            if pv != mv:
+                fail(where, f"merge check passes {key}={mv!r}, PR suite {pv!r}: cache keys would differ")
 
 # 5. The release model: release-please behind the merge check, publishing behind release-please.
 if RELEASE_MAIN in docs:
