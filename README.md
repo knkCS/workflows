@@ -27,8 +27,12 @@ self-test (`tests/rendering-check/run.sh`, `tests/change-areas/run.sh`). It
 also calls `go-service-ci.yml` from the PR's own commit with five fixed change
 sets — docs-only, Go-only (in both test modes), UI-only and image-only — against the
 fixtures in `tests/go-service-ci/`, and checks that each ran exactly the jobs
-its change areas need. The root `package.json` exists only for that UI
-fixture.
+its change areas need. Three more calls run the merge check: green on clean
+fixtures with no test run, no service container and no image build, and failing on a
+Go compile error and on a UI type error (read back from the workflow's
+`*-outcome` outputs, with the test-only `test-soft-fail` keeping the run
+green). The root
+`package.json` exists only for the UI fixtures.
 
 ### Job timeouts
 
@@ -41,7 +45,7 @@ slow but healthy run is plausible, a caller can raise the timeout with a
 
 | Workflow | Input | Default | Jobs it bounds |
 |---|---|---|---|
-| `go-service-ci.yml` | `test-timeout-minutes` | `40` | `go` |
+| `go-service-ci.yml` | `test-timeout-minutes` | `40` | `go` (also as the merge check) |
 | `go-service-ci.yml` | `ui-timeout-minutes` | `15` | `ui` |
 | `go-service-ci.yml` | `image-timeout-minutes` | `30` | `image` |
 | `publish-image-chart.yml` | `build-timeout-minutes` | `30` | each `build` leg (amd64, arm64) |
@@ -111,10 +115,67 @@ whitespace- or newline-separated list of shell globs over the whole path, where
 The full rules (Go, UI, image) are in the header of `scripts/change-areas.sh`,
 the classifier; its fixture self-test is `tests/change-areas/run.sh`.
 
+### `go-service-ci.yml`: the merge check
+
+`mode: merge-check` turns the workflow into the **merge check** — the light,
+compile-level check a caller runs on every `push: main`, instead of the full
+PR suite. It exists to catch two individually green PRs that do not compile
+together, and it is what a release gates on (see ADR 0002: on knkCS it is the
+only safety net).
+
+- **One job, no tests.** The `go` job runs as the merge check — in the
+  checks list under your job's name, e.g. `merge-check / go` — doing ent drift,
+  gofmt (each when enabled), vet and helm lint (with `helm-chart`), then, with
+  a `ui-package`, `npm ci`, the package build (and `web`'s with
+  `frontend-build`) and `tsc --noEmit`. No Test step runs and no service
+  container starts, whatever `test-mode` says; neither the `ui` job nor the
+  `image` job runs (even with `image-check` on), and
+  `ui-lint`/`ui-test` are PR-suite gates only. The typecheck is its own step
+  because a Vite build does not typecheck.
+- **Every area, always.** Change areas do not apply: the merge check checks the
+  whole tree on every event, so no change set can skip the release gate.
+- **One result.** `ci-ok` is the merge check's verdict too. A caller gates
+  the next job on the call itself — `needs: <the merge check job>` runs only if
+  every job in it passed:
+
+```yaml
+on:
+  push:
+    branches: [main]
+jobs:
+  merge-check:
+    uses: knkcs/workflows/.github/workflows/go-service-ci.yml@v1
+    with:
+      mode: merge-check
+      # the same layout inputs as the PR suite: ui-package, helm-chart, ...
+    secrets:
+      CI_TOKEN: ${{ secrets.CI_TOKEN }}
+  release-please:
+    needs: merge-check
+    uses: knkcs/workflows/.github/workflows/release-please.yml@v1
+```
+
+- **It warms every PR's caches.** Actions caches are scoped to a branch, and a
+  pull request can restore its own branch's caches and its base branch's —
+  never another PR's. Run on `main`, the merge check's `setup-go` (Go module
+  and build cache, keyed on the module's `go.sum`) and `setup-node` (npm
+  cache, keyed on `package-lock.json`) save their cache under the `main` scope
+  whenever the key is new there, so a PR's `go` and `ui` jobs start from it
+  instead of cold. Pass the same `go-version-file`, `working-directory` and
+  runner OS as the PR suite, or the keys will not match. A cache is only saved
+  by a green job, and a key that exists is never overwritten — a new `go.sum`
+  or lockfile makes a new one.
+
+Outputs: `vet-outcome`, `typecheck-outcome` (the merge check's UI typecheck)
+and `test-outcome` report what the `go` job's Vet, Typecheck and Test steps did
+— `success`, `failure` or `skipped`, empty when the job did not run. A caller
+rarely needs them; this repo's self-test reads them.
+
 ### `go-service-ci.yml` inputs
 
 | Input | Type | Default | Effect |
 |---|---|---|---|
+| `mode` | string | `pr-suite` | `pr-suite` (the full PR suite) or `merge-check` (see [the merge check](#go-service-ciyml-the-merge-check)); anything else fails the `changes` job |
 | `go-version-file` | string | `go.mod` | File `setup-go` reads the toolchain version from |
 | `test-mode` | string | `testcontainers` | `testcontainers` (Docker-in-job) or `services` (Postgres + Redis service containers) |
 | `test-timeout` | string | `30m` | `go test -timeout`. Explicit because Go's default is 600s **per package** |
@@ -137,6 +198,7 @@ the classifier; its fixture self-test is `tests/change-areas/run.sh`.
 | `image-timeout-minutes` | number | `30` | Job timeout for the `image` job |
 | `docs-exclude` | string | `""` | Extra paths that are never docs (see [change areas](#go-service-ciyml-change-areas-and-the-suite-verdict)) |
 | `test-changed-files` | string | `""` | **Test-only**, for this repo's self-test: replaces the PR's changed-file list. Callers never set it |
+| `test-soft-fail` | boolean | `false` | **Test-only**, for this repo's self-test: a failing Vet or UI typecheck step does not fail the `go` job, so a failure can be asserted while the run stays green. Callers never set it |
 
 `check-gofmt`, `ui-lint`, `ui-test`, `npm-github-packages` and `image-check`
 are opt-in and default to off, so enabling them is always a deliberate change

@@ -1,0 +1,13 @@
+{
+  "name": "go-service-ci-selftest-ui-type-error",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Self-test fixture that does NOT typecheck, on purpose. Its build emits without type checking (`tsc --noCheck`), the way a Vite build does, so only go-service-ci's `tsc --noEmit` step can catch the error.",
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p . --noCheck"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3"
+  }
+}

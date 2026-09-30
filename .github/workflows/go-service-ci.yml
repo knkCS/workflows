@@ -2,6 +2,11 @@ name: Go Service CI
 on:
   workflow_call:
     inputs:
+      # Which check this run is (see CONTEXT.md): `pr-suite`, the full set a
+      # pull request must pass, or `merge-check`, the light compile-level check
+      # a caller runs on `push: main` — vet, UI build + typecheck and helm lint
+      # in the one `go` job, no tests and no service containers.
+      mode:                { type: string, default: pr-suite }        # pr-suite | merge-check
       go-version-file:     { type: string, default: go.mod }
       test-mode:           { type: string, default: testcontainers }  # testcontainers | services
       test-timeout:        { type: string, default: 30m }             # go test -timeout; see the Test steps
@@ -44,8 +49,24 @@ on:
       # this repo's self-test can drive the `changes` job with a fixed change
       # set. Inert when empty, which is the default; callers never set it.
       test-changed-files:  { type: string, default: "" }
+      # TEST-ONLY. The Vet and UI typecheck steps record their failure without
+      # failing the job (step-level continue-on-error), so this repo's
+      # self-test can prove the merge check catches a Go compile error and a UI
+      # type error while its own run stays green: a failed job is a red check
+      # on the PR whatever the caller does with it. Callers never set it.
+      test-soft-fail:      { type: boolean, default: false }
     secrets:
       CI_TOKEN: { required: true }
+    # What the `go` job's key steps did: `success`, `failure` or `skipped`,
+    # empty when the job did not run. An outcome is taken BEFORE
+    # continue-on-error, so under `test-soft-fail` a failed step still reads
+    # `failure` here while its job stays green; that is how this repo's
+    # self-test asserts the merge check caught an error (the jobs API reports
+    # such a step as `success`).
+    outputs:
+      vet-outcome:       { value: "${{ jobs.go.outputs.vet }}" }
+      typecheck-outcome: { value: "${{ jobs.go.outputs.typecheck }}" }  # merge check only; the `ui` job's is not reported
+      test-outcome:      { value: "${{ jobs.go.outputs.test }}" }
 
 permissions:
   contents: read
@@ -74,6 +95,10 @@ jobs:
   # The `go` job runs when the Go area is on, `ui` when the UI area is, and
   # `image` (with `image-check` on) when the image area is; a docs-only PR
   # (`docs-only`, kept for the log) therefore runs none of them.
+  #
+  # In `merge-check` mode every area is on, whatever the event and even with
+  # `test-changed-files` set: the merge check is what a caller gates releases
+  # on, so no change set may skip it.
   changes:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -98,6 +123,14 @@ jobs:
         run: |
           echo "::error::ui-lint/ui-test require ui-package — the UI job only runs when one is set"
           exit 1
+      # An unknown mode would otherwise run as neither: refuse it loudly.
+      - name: Reject an unknown mode
+        if: ${{ inputs.mode != 'pr-suite' && inputs.mode != 'merge-check' }}
+        env:
+          MODE: ${{ inputs.mode }}
+        run: |
+          echo "::error::mode must be pr-suite or merge-check, got '${MODE}'"
+          exit 1
       # The caller's checkout is not this repo, so the classifier is fetched
       # from the commit this workflow file was resolved from — script and
       # workflow can never skew (argocd-rendering-check.yml's pattern; the
@@ -121,6 +154,7 @@ jobs:
           GO_DIR: ${{ inputs.working-directory }}
           HELM_CHART: ${{ inputs.helm-chart }}
           UI_PACKAGE: ${{ inputs.ui-package }}
+          MODE: ${{ inputs.mode }}
         run: |
           set -euo pipefail
           classify() {
@@ -129,7 +163,11 @@ jobs:
           }
           every_area() { echo "$1; running every area" >&2; printf 'docs=true\ngo=true\nui=true\nimage=true\n'; }
 
-          if [ -n "$TEST_CHANGED_FILES" ]; then
+          if [ "$MODE" = merge-check ]; then
+            # The merge check checks the whole tree, whatever the event: it is
+            # the release gate, and it must never be skipped by a change set.
+            areas=$(every_area "merge check")
+          elif [ -n "$TEST_CHANGED_FILES" ]; then
             echo "::notice::test-changed-files is set: classifying a fixed change set, not the PR's"
             areas=$(printf '%s\n' "$TEST_CHANGED_FILES" | classify)
           elif [ "$EVENT" != pull_request ] && [ "$EVENT" != pull_request_target ]; then
@@ -170,24 +208,39 @@ jobs:
   # runs there (ent drift, gofmt, vet, tests and the embed stub are all
   # module-relative). `go-version-file` and `helm-chart` stay relative to the
   # repository root, as they always were.
+  #
+  # In `merge-check` mode this job IS the merge check: the same fast Go
+  # checks, then — with a `ui-package` — `npm ci`, the UI build and `tsc --noEmit` (a Vite build does not typecheck), and
+  # no tests: no Test step and no service containers, whatever `test-mode`
+  # says. One job, so one runner and one Go setup. Run on `push: main`, its
+  # setup-go and setup-node save the Go module + build cache and the npm cache
+  # under the `main` scope on a key miss, which every PR can restore — a PR
+  # run can read its base branch's caches, never another PR's. It stays named
+  # `go` (the caller's job name says which check it is): a skipped job's
+  # `name:` expression is never evaluated, so a mode-dependent name would show
+  # raw in the checks list of every PR suite that skips this job.
   go:
     needs: changes
     if: ${{ needs.changes.outputs.go == 'true' }}
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: ${{ inputs.test-timeout-minutes }}
+    outputs:
+      vet: ${{ steps.vet.outcome }}
+      typecheck: ${{ steps.typecheck.outcome }}
+      test: ${{ steps.test.outcome }}
     defaults:
       run:
         working-directory: ${{ inputs.working-directory }}
     services:
       postgres:
-        image: ${{ inputs.test-mode == 'services' && 'postgres:16-alpine' || '' }}
+        image: ${{ inputs.mode != 'merge-check' && inputs.test-mode == 'services' && 'postgres:16-alpine' || '' }}
         env: { POSTGRES_USER: ci, POSTGRES_PASSWORD: ci, POSTGRES_DB: ci }
         ports: ["5432:5432"]
         options: >-
           --health-cmd "pg_isready -U ci" --health-interval 10s
           --health-timeout 5s --health-retries 5
       redis:
-        image: ${{ inputs.test-mode == 'services' && 'redis:7-alpine' || '' }}
+        image: ${{ inputs.mode != 'merge-check' && inputs.test-mode == 'services' && 'redis:7-alpine' || '' }}
         ports: ["6379:6379"]
         options: >-
           --health-cmd "redis-cli ping" --health-interval 10s
@@ -258,6 +311,8 @@ jobs:
             exit 1
           fi
       - name: Vet
+        id: vet
+        continue-on-error: ${{ inputs.test-soft-fail }}
         run: go vet ./...
       - uses: azure/setup-helm@v5
         if: ${{ inputs.helm-chart != '' }}
@@ -265,19 +320,54 @@ jobs:
         if: ${{ inputs.helm-chart != '' }}
         working-directory: ${{ github.workspace }}
         run: helm lint ${{ inputs.helm-chart }}
+      # Merge check only: the `ui` job's build and typecheck, and the setup and
+      # `npm ci` they need, on this runner (see the `ui` job for the npm
+      # credential). Lint and the UI tests stay PR-suite gates. Same Node
+      # version and lockfile as the `ui` job, so the npm cache this saves on
+      # `main` has the key that job restores.
+      - uses: actions/setup-node@v4
+        if: ${{ inputs.mode == 'merge-check' && inputs.ui-package != '' }}
+        with: { node-version: "22", cache: npm, cache-dependency-path: package-lock.json }
+      - name: Authenticate npm to GitHub Packages
+        if: ${{ inputs.mode == 'merge-check' && inputs.ui-package != '' && inputs.npm-github-packages }}
+        working-directory: ${{ github.workspace }}
+        run: echo "//npm.pkg.github.com/:_authToken=${CI_TOKEN}" >> ~/.npmrc
+        env:
+          CI_TOKEN: ${{ secrets.CI_TOKEN }}
+      - name: Install UI dependencies
+        if: ${{ inputs.mode == 'merge-check' && inputs.ui-package != '' }}
+        working-directory: ${{ github.workspace }}
+        run: npm ci ${{ inputs.node-ci-flags }}
+      - name: Build UI package
+        if: ${{ inputs.mode == 'merge-check' && inputs.ui-package != '' }}
+        working-directory: ${{ github.workspace }}
+        run: npm run -w ${{ inputs.ui-package }} build
+      - name: Build embedded frontend
+        if: ${{ inputs.mode == 'merge-check' && inputs.ui-package != '' && inputs.frontend-build }}
+        working-directory: ${{ github.workspace }}
+        run: npm run -w web build
+      - name: Typecheck UI package
+        id: typecheck
+        if: ${{ inputs.mode == 'merge-check' && inputs.ui-package != '' }}
+        continue-on-error: ${{ inputs.test-soft-fail }}
+        working-directory: ${{ github.workspace }}/${{ inputs.ui-package }}
+        run: npx tsc --noEmit
       # -timeout is explicit because Go's default is 600s PER PACKAGE, and a
       # package that outgrows it fails with a stack dump that reads like a
       # deadlock rather than a slow suite. A green run here is otherwise only
       # evidence that this runner happened to be fast enough — margin, not
       # configuration. Raise `test-timeout` for a slow suite; do not remove it.
       - name: Test
+        id: test
+        if: ${{ inputs.mode != 'merge-check' }}
         run: go test -race -cover -timeout ${{ inputs.test-timeout }} ./...
 
   # Runs only when the UI change area changed (or a file in no area), and only
-  # for a caller with a `ui-package`.
+  # for a caller with a `ui-package`. Never in `merge-check` mode, where the
+  # `go` job builds and typechecks the UI package itself.
   ui:
     needs: changes
-    if: ${{ needs.changes.outputs.ui == 'true' && inputs.ui-package != '' }}
+    if: ${{ needs.changes.outputs.ui == 'true' && inputs.ui-package != '' && inputs.mode != 'merge-check' }}
     runs-on: ubuntu-latest
     timeout-minutes: ${{ inputs.ui-timeout-minutes }}
     steps:
@@ -355,6 +445,8 @@ jobs:
   # the image change area changed (Dockerfile*, .dockerignore, docker/ — or a
   # file in no area, which counts as every area). A Go- or UI-only change does
   # not run it: the `go` and `ui` jobs check the code the image compiles.
+  # Never in `merge-check` mode: the merge check is one light compile-level
+  # job, and on `main` the publish workflow builds the image anyway.
   #
   # - amd64 only — the deployment target, on an amd64 runner, so a native
   #   build (ADR 0001). The arm64 developer platform is built by the publish
@@ -373,7 +465,7 @@ jobs:
   #   PR entries count towards the repo's cache quota until evicted.
   image:
     needs: changes
-    if: ${{ inputs.image-check && needs.changes.outputs.image == 'true' }}
+    if: ${{ inputs.image-check && needs.changes.outputs.image == 'true' && inputs.mode != 'merge-check' }}
     runs-on: ubuntu-latest
     timeout-minutes: ${{ inputs.image-timeout-minutes }}
     steps:
@@ -398,6 +490,8 @@ jobs:
   # so does a job skipped because one it needed failed, since that failure is
   # in the same `needs` context. Logic in scripts/suite-verdict.sh, tested by
   # tests/change-areas/run.sh. A new job in this workflow MUST be added here.
+  # In `merge-check` mode it is the merge check's verdict too (`go` ran as the
+  # merge check, `ui` and `image` skipped): green only if it passed.
   ci-ok:
     needs: [changes, go, ui, image]
     if: ${{ always() }}
