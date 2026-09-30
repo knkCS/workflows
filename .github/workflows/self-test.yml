@@ -20,21 +20,24 @@ name: Self-test
 #   conservative one, a file in no known area turns on every area — and the
 #   suite verdict behind its `ci-ok` job (green on pass/skipped, red on
 #   failure/cancelled).
-# - `docs-only-suite`, `go-only-suite`, `services-suite` and `ui-only-suite`
-#   call go-service-ci from THIS commit (local path), each with a fixed change
-#   set from its test-only `test-changed-files` input, and `suites-check` reads
-#   the run's job list back to prove each ran exactly what its change areas
-#   need: docs-only runs neither `go` nor `ui`, Go-only runs `go` alone (in
-#   both test modes), UI-only runs `ui` alone — and `changes` and `ci-ok` are
-#   green in every one. The jobs that do run are real: the Go fixtures under
-#   tests/go-service-ci/ are modules in subdirectories (`working-directory`),
-#   one of whose tests needs the `services` containers, and the UI fixture is
-#   a workspace of the root package.json.
+# - `docs-only-suite`, `go-only-suite`, `services-suite`, `ui-only-suite` and
+#   `image-only-suite` call go-service-ci from THIS commit (local path), each
+#   with a fixed change set from its test-only `test-changed-files` input, and
+#   `suites-check` reads the run's job list back to prove each ran exactly what
+#   its change areas need: docs-only runs none of `go`, `ui` and `image`,
+#   Go-only runs `go` alone (in both test modes, and with `image-check` on),
+#   UI-only runs `ui` alone, image-only runs `image` alone — and `changes` and
+#   `ci-ok` are green in every one. The jobs that do run are real: the Go
+#   fixtures under tests/go-service-ci/ are modules in subdirectories
+#   (`working-directory`), one of whose tests needs the `services` containers,
+#   the UI fixture is a workspace of the root package.json, and the image
+#   fixture is a Dockerfile that fails unless built for amd64 with the
+#   `ci_token` BuildKit secret.
 # - `merge-check-suite`, `merge-check-go-error-suite` and
 #   `merge-check-ui-error-suite` call it in `merge-check` mode: green on clean
-#   fixtures with no test run and no service container started, and — read
-#   back step by step by `suites-check` — failing Vet on a Go compile error
-#   and the UI typecheck on a type error. The two failing ones set the
+#   fixtures with no test run, no service container and no image build,
+#   and — read back step by step by `suites-check` — failing Vet on a Go
+#   compile error and the UI typecheck on a type error. The two failing ones set the
 #   test-only `test-soft-fail`, so the failure is recorded on the step while
 #   this run stays green.
 #
@@ -101,13 +104,14 @@ jobs:
         run: bash tests/change-areas/run.sh
 
   # The PR suite end to end: go-service-ci called from THIS commit (local
-  # path) with four fixed change sets (its test-only `test-changed-files`
+  # path) with five fixed change sets (its test-only `test-changed-files`
   # input, since this PR's own files are none of them), and `suites-check`
   # reading the run's job list back to prove which jobs ran and which were
   # skipped. The fixtures under tests/go-service-ci/ make every job that SHOULD
   # run a real one: a Go module in a subdirectory (so `working-directory` is
-  # exercised), a Go module whose test needs the `services` containers, and a
-  # UI workspace hanging from the root package.json.
+  # exercised), a Go module whose test needs the `services` containers, a
+  # UI workspace hanging from the root package.json, and a Dockerfile (so
+  # `image-context` is exercised).
   docs-only-suite:
     uses: ./.github/workflows/go-service-ci.yml
     with:
@@ -128,9 +132,10 @@ jobs:
   # Go-only, testcontainers mode (no service containers — their images resolve
   # to empty, which the runner skips). The change set leans on the caller's
   # layout: the module's testdata and the chart are Go only because they sit
-  # under `working-directory` and `helm-chart`. `ui-package` is the real
-  # fixture, so the `ui` job WOULD pass if it wrongly ran; suites-check is what
-  # catches that.
+  # under `working-directory` and `helm-chart`. `ui-package` and
+  # `image-context` are the real fixtures, with `image-check` on, so the `ui`
+  # and `image` jobs WOULD pass if they wrongly ran; suites-check is what
+  # catches that — a Go change must not build the image.
   go-only-suite:
     uses: ./.github/workflows/go-service-ci.yml
     with:
@@ -147,6 +152,8 @@ jobs:
       check-gofmt: true
       embed-frontend: true
       ui-package: tests/go-service-ci/ui-package
+      image-check: true
+      image-context: tests/go-service-ci/image
     secrets:
       CI_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # read access to this public repo is all the Go job needs
 
@@ -185,12 +192,36 @@ jobs:
     secrets:
       CI_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # never used: npm-github-packages is off and the Go job must not run
 
+  # Image-only, with `image-check` on: the `image` job builds the fixture
+  # Dockerfile, which fails unless it is built for linux/amd64 with a
+  # non-empty `ci_token` BuildKit secret, so a green `image` job proves both.
+  # `working-directory` and `ui-package` are the real fixtures, so the `go` and
+  # `ui` jobs WOULD pass if they wrongly ran; suites-check is what catches that.
+  image-only-suite:
+    uses: ./.github/workflows/go-service-ci.yml
+    with:
+      test-changed-files: |
+        Dockerfile
+        .dockerignore
+        docker/entrypoint.sh
+        tests/go-service-ci/image/Dockerfile
+      image-check: true
+      image-context: tests/go-service-ci/image
+      go-version-file: tests/go-service-ci/go-module/go.mod
+      working-directory: tests/go-service-ci/go-module
+      check-ent-drift: false
+      ui-package: tests/go-service-ci/ui-package
+    secrets:
+      CI_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # the fixture only checks the secret arrives non-empty
+
   # The merge check (`mode: merge-check`), green: vet, helm lint and the UI
-  # build + typecheck in the one `go` job. Its Go module vets clean but its one test always fails, and
-  # `test-mode: services` is set, so a green job proves no test ran; the
-  # step list in suites-check proves no service container started. The change
+  # build + typecheck in the one `go` job. Its Go module vets clean but its
+  # one test always fails, and `test-mode: services` is set, so a green job
+  # proves no test ran; the step list in suites-check proves no service
+  # container started. The change
   # set is docs-only — it would skip every job in a PR suite — to prove the
-  # merge check ignores change areas.
+  # merge check ignores change areas; `image-check` is on, to prove the merge
+  # check never builds the image.
   merge-check-suite:
     uses: ./.github/workflows/go-service-ci.yml
     with:
@@ -204,6 +235,8 @@ jobs:
       check-ent-drift: false
       check-gofmt: true
       embed-frontend: true
+      image-check: true  # every area is on, so only the mode keeps `image` from running
+      image-context: tests/go-service-ci/image
     secrets:
       CI_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -239,7 +272,7 @@ jobs:
       CI_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   suites-check:
-    needs: [docs-only-suite, go-only-suite, services-suite, ui-only-suite, merge-check-suite, merge-check-go-error-suite, merge-check-ui-error-suite]
+    needs: [docs-only-suite, go-only-suite, services-suite, ui-only-suite, image-only-suite, merge-check-suite, merge-check-go-error-suite, merge-check-ui-error-suite]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -261,30 +294,42 @@ jobs:
             'docs-only-suite / changes=success' \
             'docs-only-suite / go=skipped' \
             'docs-only-suite / ui=skipped' \
+            'docs-only-suite / image=skipped' \
             'docs-only-suite / ci-ok=success' \
             'go-only-suite / changes=success' \
             'go-only-suite / go=success' \
             'go-only-suite / ui=skipped' \
+            'go-only-suite / image=skipped' \
             'go-only-suite / ci-ok=success' \
             'services-suite / changes=success' \
             'services-suite / go=success' \
             'services-suite / ui=skipped' \
+            'services-suite / image=skipped' \
             'services-suite / ci-ok=success' \
             'ui-only-suite / changes=success' \
             'ui-only-suite / go=skipped' \
             'ui-only-suite / ui=success' \
+            'ui-only-suite / image=skipped' \
             'ui-only-suite / ci-ok=success' \
+            'image-only-suite / changes=success' \
+            'image-only-suite / go=skipped' \
+            'image-only-suite / ui=skipped' \
+            'image-only-suite / image=success' \
+            'image-only-suite / ci-ok=success' \
             'merge-check-suite / changes=success' \
             'merge-check-suite / go=success' \
             'merge-check-suite / ui=skipped' \
+            'merge-check-suite / image=skipped' \
             'merge-check-suite / ci-ok=success' \
             'merge-check-go-error-suite / changes=success' \
             'merge-check-go-error-suite / go=success' \
             'merge-check-go-error-suite / ui=skipped' \
+            'merge-check-go-error-suite / image=skipped' \
             'merge-check-go-error-suite / ci-ok=success' \
             'merge-check-ui-error-suite / changes=success' \
             'merge-check-ui-error-suite / go=success' \
             'merge-check-ui-error-suite / ui=skipped' \
+            'merge-check-ui-error-suite / image=skipped' \
             'merge-check-ui-error-suite / ci-ok=success' | sort)
           if [ "$jobs" != "$want" ]; then
             echo "::error::a change set ran the wrong jobs; want:"
