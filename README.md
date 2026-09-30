@@ -120,8 +120,8 @@ PR suite. It exists to catch two individually green PRs that do not compile
 together, and it is what a release gates on (see ADR 0002: on knkCS it is the
 only safety net).
 
-- **One job, no tests.** The `go` job runs as the merge check — named
-  `merge-check` in the checks list, e.g. `ci / merge-check` — doing ent drift,
+- **One job, no tests.** The `go` job runs as the merge check — in the
+  checks list under your job's name, e.g. `merge-check / go` — doing ent drift,
   gofmt (each when enabled), vet and helm lint (with `helm-chart`), then, with
   a `ui-package`, `npm ci`, the package build (and `web`'s with
   `frontend-build`) and `tsc --noEmit`. No Test step runs and no service

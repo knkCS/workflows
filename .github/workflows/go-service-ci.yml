@@ -191,16 +191,17 @@ jobs:
   # module-relative). `go-version-file` and `helm-chart` stay relative to the
   # repository root, as they always were.
   #
-  # In `merge-check` mode this job IS the merge check, and is named so in the
-  # checks list: the same fast Go checks, then — with a `ui-package` — `npm
-  # ci`, the UI build and `tsc --noEmit` (a Vite build does not typecheck), and
+  # In `merge-check` mode this job IS the merge check: the same fast Go
+  # checks, then — with a `ui-package` — `npm ci`, the UI build and `tsc --noEmit` (a Vite build does not typecheck), and
   # no tests: no Test step and no service containers, whatever `test-mode`
   # says. One job, so one runner and one Go setup. Run on `push: main`, its
   # setup-go and setup-node save the Go module + build cache and the npm cache
   # under the `main` scope on a key miss, which every PR can restore — a PR
-  # run can read its base branch's caches, never another PR's.
+  # run can read its base branch's caches, never another PR's. It stays named
+  # `go` (the caller's job name says which check it is): a skipped job's
+  # `name:` expression is never evaluated, so a mode-dependent name would show
+  # raw in the checks list of every PR suite that skips this job.
   go:
-    name: ${{ inputs.mode == 'merge-check' && 'merge-check' || 'go' }}
     needs: changes
     if: ${{ needs.changes.outputs.go == 'true' }}
     runs-on: ${{ inputs.runs-on }}

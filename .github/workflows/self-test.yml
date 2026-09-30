@@ -186,8 +186,7 @@ jobs:
       CI_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # never used: npm-github-packages is off and the Go job must not run
 
   # The merge check (`mode: merge-check`), green: vet, helm lint and the UI
-  # build + typecheck in the one `go` job, which the checks list names
-  # `merge-check`. Its Go module vets clean but its one test always fails, and
+  # build + typecheck in the one `go` job. Its Go module vets clean but its one test always fails, and
   # `test-mode: services` is set, so a green job proves no test ran; the
   # step list in suites-check proves no service container started. The change
   # set is docs-only — it would skip every job in a PR suite — to prove the
@@ -276,15 +275,15 @@ jobs:
             'ui-only-suite / ui=success' \
             'ui-only-suite / ci-ok=success' \
             'merge-check-suite / changes=success' \
-            'merge-check-suite / merge-check=success' \
+            'merge-check-suite / go=success' \
             'merge-check-suite / ui=skipped' \
             'merge-check-suite / ci-ok=success' \
             'merge-check-go-error-suite / changes=success' \
-            'merge-check-go-error-suite / merge-check=success' \
+            'merge-check-go-error-suite / go=success' \
             'merge-check-go-error-suite / ui=skipped' \
             'merge-check-go-error-suite / ci-ok=success' \
             'merge-check-ui-error-suite / changes=success' \
-            'merge-check-ui-error-suite / merge-check=success' \
+            'merge-check-ui-error-suite / go=success' \
             'merge-check-ui-error-suite / ui=skipped' \
             'merge-check-ui-error-suite / ci-ok=success' | sort)
           if [ "$jobs" != "$want" ]; then
@@ -303,12 +302,12 @@ jobs:
           JOBS_URL: repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}/jobs
         run: |
           set -euo pipefail
-          all=$(gh api --paginate "$JOBS_URL" --jq '.jobs[] | select(.name | test("^merge-check-.*suite / merge-check$"))' | jq -s .)
+          all=$(gh api --paginate "$JOBS_URL" --jq '.jobs[] | select(.name | test("^merge-check-.*suite / go$"))' | jq -s .)
           failed=0
           # expect SUITE STEP WANT...: the step's conclusion must be one of WANT.
           expect() {
             local suite=$1 step=$2 got; shift 2
-            got=$(jq -r --arg job "$suite / merge-check" --arg step "$step" \
+            got=$(jq -r --arg job "$suite / go" --arg step "$step" \
               '[.[] | select(.name == $job) | .steps[] | select(.name == $step) | .conclusion] | first // "-"' <<<"$all")
             for want in "$@"; do
               if [ "$got" = "$want" ]; then echo "ok    $suite: $step=$got"; return; fi
