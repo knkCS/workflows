@@ -18,9 +18,17 @@ on:
       # Job timeouts, so a hang costs minutes rather than GitHub's 6-hour limit.
       # The test jobs' 40 sits above the 30m `test-timeout` default, so go test's
       # own timeout (with its stack dump) fires first; raise both together.
-      # `backend` and `helm` are fixed at 10.
+      # `changes`, `backend`, `helm` and `ci-ok` are fixed at 10.
       test-timeout-minutes: { type: number, default: 40 }
       ui-timeout-minutes:   { type: number, default: 15 }
+      # Extra paths that are never docs (whitespace/newline-separated shell
+      # globs over the whole path; `*` crosses `/`): repo-specific Markdown that
+      # is really an input to code. See scripts/change-areas.sh.
+      docs-exclude:        { type: string, default: "" }
+      # TEST-ONLY. Replaces the PR's changed-file list (newline-separated) so
+      # this repo's self-test can drive the `changes` job with a fixed change
+      # set. Inert when empty, which is the default; callers never set it.
+      test-changed-files:  { type: string, default: "" }
     secrets:
       CI_TOKEN: { required: true }
 
@@ -28,7 +36,81 @@ permissions:
   contents: read
 
 jobs:
+  # Which change areas (docs, Go, UI, image — see CONTEXT.md) the PR touches.
+  # The classifier is scripts/change-areas.sh in THIS repo, fixture-tested by
+  # tests/change-areas/run.sh; its header holds the rules. The one to remember:
+  # a file in no known area turns on every area, so change detection can only
+  # ever run too much, never too little.
+  #
+  # The file list comes from the compare API (base...head, the same three-dot
+  # diff a PR shows), so there is no checkout of the caller and no deep fetch.
+  # The compare endpoint needs only `contents: read`, which this workflow
+  # already has — the PR-files endpoint would need `pull-requests: read`, and a
+  # reusable workflow asking for more than its caller grants fails at startup.
+  # A non-PR event (push, dispatch) has no change set and means every area, as
+  # does anything the API cannot answer in full.
+  #
+  # Today only a docs-only PR skips anything: the jobs below run unless
+  # `docs-only` is true. Per-area gating of the Go and UI jobs is #24.
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      docs: ${{ steps.classify.outputs.docs }}
+      go: ${{ steps.classify.outputs.go }}
+      ui: ${{ steps.classify.outputs.ui }}
+      image: ${{ steps.classify.outputs.image }}
+      docs-only: ${{ steps.classify.outputs.docs-only }}
+    steps:
+      # The caller's checkout is not this repo, so the classifier is fetched
+      # from the commit this workflow file was resolved from — script and
+      # workflow can never skew (argocd-rendering-check.yml's pattern; the
+      # fallback ref exists only for contexts that leave the SHA empty).
+      - uses: actions/checkout@v6
+        with:
+          repository: knkcs/workflows
+          ref: ${{ job.workflow_sha || 'v1' }}
+          path: .knkcs-workflows
+          sparse-checkout: scripts
+      - name: Classify the changed files
+        id: classify
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          DOCS_EXCLUDE: ${{ inputs.docs-exclude }}
+          TEST_CHANGED_FILES: ${{ inputs.test-changed-files }}
+        run: |
+          set -euo pipefail
+          classify() { bash .knkcs-workflows/scripts/change-areas.sh --docs-exclude "$DOCS_EXCLUDE"; }
+          every_area() { echo "$1; running every area" >&2; printf 'docs=true\ngo=true\nui=true\nimage=true\n'; }
+
+          if [ -n "$TEST_CHANGED_FILES" ]; then
+            echo "::notice::test-changed-files is set: classifying a fixed change set, not the PR's"
+            areas=$(printf '%s\n' "$TEST_CHANGED_FILES" | classify)
+          elif [ "$EVENT" != pull_request ] && [ "$EVENT" != pull_request_target ]; then
+            areas=$(every_area "no pull request in context ($EVENT)")
+          elif ! compare=$(gh api "repos/${REPO}/compare/${BASE_SHA}...${HEAD_SHA}" --jq '{n: (.files | length), files: [.files[].filename]}'); then
+            echo "::warning::could not list the pull request's changed files"
+            areas=$(every_area "no change set")
+          elif [ "$(jq '.n' <<<"$compare")" -ge 300 ]; then
+            # The compare API lists at most 300 files; a longer list is cut.
+            areas=$(every_area "300 or more changed files, the list may be incomplete")
+          else
+            files=$(jq -r '.files[]' <<<"$compare")
+            printf 'changed files:\n%s\n\n' "$files"
+            areas=$(printf '%s\n' "$files" | classify)
+          fi
+
+          docs_only=true
+          if grep -qxE '(go|ui|image)=true' <<<"$areas"; then docs_only=false; fi
+          printf '%s\ndocs-only=%s\n' "$areas" "$docs_only" | tee -a "$GITHUB_OUTPUT"
+
   backend:
+    needs: changes
+    if: ${{ needs.changes.outputs.docs-only != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -39,7 +121,8 @@ jobs:
       # rather than implying it: the workflow cannot guess which workspace to run,
       # and a default of "the repo root" is the root-level invocation the UI job's
       # comment explains is worthless. This check lives here because `backend` is
-      # the only job that always runs; it needs no checkout, so it fails in seconds.
+      # the one job every non-docs-only PR runs; it needs no checkout, so it
+      # fails in seconds.
       - name: Reject UI gates without a UI package
         if: ${{ (inputs.ui-lint || inputs.ui-test) && inputs.ui-package == '' }}
         run: |
@@ -108,7 +191,8 @@ jobs:
         run: go vet ./...
 
   test-testcontainers:
-    if: ${{ inputs.test-mode == 'testcontainers' }}
+    needs: changes
+    if: ${{ needs.changes.outputs.docs-only != 'true' && inputs.test-mode == 'testcontainers' }}
     runs-on: ubuntu-latest
     timeout-minutes: ${{ inputs.test-timeout-minutes }}
     steps:
@@ -132,7 +216,8 @@ jobs:
         run: go test -race -cover -timeout ${{ inputs.test-timeout }} ./...
 
   test-services:
-    if: ${{ inputs.test-mode == 'services' }}
+    needs: changes
+    if: ${{ needs.changes.outputs.docs-only != 'true' && inputs.test-mode == 'services' }}
     runs-on: ubuntu-latest
     timeout-minutes: ${{ inputs.test-timeout-minutes }}
     services:
@@ -170,7 +255,8 @@ jobs:
         run: go test -race -cover -timeout ${{ inputs.test-timeout }} ./...
 
   ui:
-    if: ${{ inputs.ui-package != '' }}
+    needs: changes
+    if: ${{ needs.changes.outputs.docs-only != 'true' && inputs.ui-package != '' }}
     runs-on: ubuntu-latest
     timeout-minutes: ${{ inputs.ui-timeout-minutes }}
     steps:
@@ -243,10 +329,36 @@ jobs:
         run: npx tsc --noEmit
 
   helm:
-    if: ${{ inputs.helm-chart != '' }}
+    needs: changes
+    if: ${{ needs.changes.outputs.docs-only != 'true' && inputs.helm-chart != '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
       - uses: azure/setup-helm@v5
       - run: helm lint ${{ inputs.helm-chart }}
+
+  # The suite verdict: the one check a branch-protection rule should require.
+  # `always()` makes it run — and report — whatever happened above, including
+  # a cancelled run; a required check that is skipped would read as passing.
+  # Green only if every job it needs succeeded or was skipped (by change
+  # detection or an unset input); a failed or cancelled job turns it red, and
+  # so does a job skipped because one it needed failed, since that failure is
+  # in the same `needs` context. Logic in scripts/suite-verdict.sh, tested by
+  # tests/change-areas/run.sh. A new job in this workflow MUST be added here.
+  ci-ok:
+    needs: [changes, backend, test-testcontainers, test-services, ui, helm]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          repository: knkcs/workflows
+          ref: ${{ job.workflow_sha || 'v1' }}
+          path: .knkcs-workflows
+          sparse-checkout: scripts
+      - name: Suite verdict
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: bash .knkcs-workflows/scripts/suite-verdict.sh <<<"$NEEDS"

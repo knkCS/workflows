@@ -23,7 +23,9 @@ via `secrets:` / `secrets: inherit` at call time.
 touches a workflow, a script or a test it runs actionlint over every workflow
 (configured by `.github/actionlint.yaml`), `tests/workflow-timeouts/run.sh`
 (every job declares the agreed timeout), and each engine script's fixture
-self-test (currently `tests/rendering-check/run.sh`).
+self-test (`tests/rendering-check/run.sh`, `tests/change-areas/run.sh`). It
+also calls `go-service-ci.yml` from the PR's own commit with a docs-only change
+set and checks that only `changes` and `ci-ok` ran.
 
 ### Job timeouts
 
@@ -42,10 +44,50 @@ slow but healthy run is plausible, a caller can raise the timeout with a
 | `publish-ui.yml` | `ui-timeout-minutes` | `15` | `publish` |
 | `argocd-rendering-check.yml` | `render-timeout-minutes` | `10` | `render` |
 
-Fixed at 10: `go-service-ci`'s `backend` and `helm`, `publish-image-chart`'s
+Fixed at 10: `go-service-ci`'s `changes`, `backend`, `helm` and `ci-ok`, `publish-image-chart`'s
 `merge`, `commitlint`, `release-please`. In `go-service-ci`, the test jobs'
 40 minutes sits above the 30m `test-timeout` so that `go test`'s own timeout,
 with its stack dump, fires first — raise the two together.
+
+### `go-service-ci.yml`: change areas and the suite verdict
+
+Every run starts with a `changes` job that classifies the pull request's changed
+files into **change areas** — docs, Go, UI, image — and ends with `ci-ok`, the
+**suite verdict**.
+
+- **A docs-only PR runs only `changes` and `ci-ok`**, and is green. Every other
+  job (`backend`, the test jobs, `ui`, `helm`) is skipped. For any other change
+  set every job runs as before; per-area gating of the Go and UI jobs is not
+  there yet.
+- **`ci-ok` is the one check to require** in branch protection (where the plan
+  allows it — see ADR 0002). It always runs, is red if any job that ran failed
+  or was cancelled, and is green when jobs were skipped by change detection. In
+  the checks list it appears under the caller's job name, e.g. `ci / ci-ok`.
+  Requiring the individual jobs instead would leave a docs-only PR waiting
+  forever on checks that were skipped.
+- **The file list comes from the API**, not a checkout, so no deep fetch. A
+  non-PR event (push, `workflow_dispatch`) means every area.
+- **When in doubt, every area.** A file in no known area — a Makefile, a
+  workflow, a chart, anything under `.claude/` — turns on every area, as does
+  an empty or truncated (300+ files) change set. Change detection can only ever
+  run too much, never too little.
+
+What counts as **docs**: `**/*.md`, `docs/**`, `.scratch/**`, `LICENSE*`, issue
+and PR templates under `.github/`, and `.release-please-manifest.json`. Never
+docs, whatever the extension: `**/testdata/**`, `**/fixtures/**`,
+`**/__fixtures__/**`, and anything matching the `docs-exclude` input — a
+whitespace- or newline-separated list of shell globs over the whole path, where
+`*` crosses `/`. Use it for Markdown that is really an input to code:
+
+```yaml
+    with:
+      docs-exclude: |
+        prompts/*
+        internal/templates/*.md
+```
+
+The full rules (Go, UI, image) are in the header of `scripts/change-areas.sh`,
+the classifier; its fixture self-test is `tests/change-areas/run.sh`.
 
 ### `go-service-ci.yml` inputs
 
@@ -66,6 +108,8 @@ with its stack dump, fires first — raise the two together.
 | `check-gofmt` | boolean | `false` | Fail the `backend` job if any **tracked** Go file is not gofmt-clean |
 | `test-timeout-minutes` | number | `40` | Job timeout for the test jobs; keep it above `test-timeout` (see [Job timeouts](#job-timeouts)) |
 | `ui-timeout-minutes` | number | `15` | Job timeout for the `ui` job |
+| `docs-exclude` | string | `""` | Extra paths that are never docs (see [change areas](#go-service-ciyml-change-areas-and-the-suite-verdict)) |
+| `test-changed-files` | string | `""` | **Test-only**, for this repo's self-test: replaces the PR's changed-file list. Callers never set it |
 
 `check-gofmt`, `ui-lint`, `ui-test` and `npm-github-packages` are opt-in and
 default to off, so enabling them is always a deliberate change to a caller's CI.
@@ -84,7 +128,8 @@ Four things to know before turning them on:
   rather than skipping it.
 - **`ui-lint` and `ui-test` require `ui-package`.** The `ui` job runs only when one is set, so
   setting either without it is refused loudly in the `backend` job instead of
-  being silently ignored.
+  being silently ignored (on every PR but a docs-only one, where `backend` is
+  skipped).
 - **`npm-github-packages` writes only the credential.** Before `npm ci`, the
   `ui` job appends `//npm.pkg.github.com/:_authToken=<CI_TOKEN>` to the runner's
   `~/.npmrc` — GitHub Packages rejects installs without a token, even for public

@@ -15,6 +15,18 @@ name: Self-test
 #   schema-breaking values typo. It is hermetic: the remote chart sources are a
 #   throwaway local git repo and a localhost Helm repository — no tokens, no
 #   external network beyond tool installs.
+# - `change-areas` (tests/change-areas/run.sh) pins every rule of the
+#   change-area classifier behind go-service-ci's `changes` job — above all the
+#   conservative one, a file in no known area turns on every area — and the
+#   suite verdict behind its `ci-ok` job (green on pass/skipped, red on
+#   failure/cancelled).
+# - `docs-only-suite` calls go-service-ci from THIS commit (local path) with a
+#   docs-only change set, and `docs-only-suite-check` reads the run's job list
+#   back to prove that such a PR runs `changes` and `ci-ok` only, both green,
+#   with every other job skipped. The change set comes from go-service-ci's
+#   test-only `test-changed-files` input, since this PR's own files are not
+#   docs-only. `ui-package` and `helm-chart` are set to paths that do not
+#   exist, so a wrongly-run `ui` or `helm` job would fail rather than pass.
 #
 # Every job runs on every matching PR: the checks are cheap, and a path filter
 # per job would be one more place for a real check to be skipped.
@@ -67,3 +79,50 @@ jobs:
         run: python3 -c 'import yaml' 2>/dev/null || python3 -m pip install --user pyyaml
       - name: Run rendering-check self-test
         run: bash tests/rendering-check/run.sh
+
+  change-areas:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - name: Run change-area classifier and suite verdict self-test
+        run: bash tests/change-areas/run.sh
+
+  docs-only-suite:
+    uses: ./.github/workflows/go-service-ci.yml
+    with:
+      test-changed-files: |
+        README.md
+        CONTEXT.md
+        docs/adr/0004-example.md
+        .scratch/notes.txt
+        .release-please-manifest.json
+      ui-package: packages/does-not-exist
+      helm-chart: charts/does-not-exist
+    secrets:
+      CI_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # never used: no job that reads it may run
+
+  docs-only-suite-check:
+    needs: docs-only-suite
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+    steps:
+      - name: Only changes and ci-ok ran, and both passed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          JOBS_URL: repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}/jobs
+        run: |
+          set -euo pipefail
+          jobs=$(gh api --paginate "$JOBS_URL" \
+            --jq '.jobs[] | select(.name | startswith("docs-only-suite / ")) | "\(.name | ltrimstr("docs-only-suite / "))=\(.conclusion)"' | sort)
+          printf '%s\n' "$jobs"
+          want=$(printf '%s\n' backend=skipped changes=success ci-ok=success helm=skipped \
+            test-services=skipped test-testcontainers=skipped ui=skipped | sort)
+          if [ "$jobs" != "$want" ]; then
+            echo "::error::a docs-only change set must run changes and ci-ok only; want:"
+            printf '%s\n' "$want"
+            exit 1
+          fi
