@@ -103,6 +103,17 @@ areas "mixed Go + UI + docs" docs,go,ui \
 'README.md
 internal/x.go
 packages/app-ui/src/App.tsx'
+areas "licence variants are docs" docs \
+'LICENSE.txt
+LICENSE-MIT
+third_party/lib/LICENSE
+COPYING'
+areas "LICENSE-looking code is not docs" ui 'web/src/LICENSE-modal.tsx'
+areas "LICENSES/ directory is not docs" $ALL 'LICENSES/gen.sh'
+areas "nested .claude/ Markdown is every area" $ALL 'services/api/.claude/README.md'
+areas "rename Go -> docs (old + new path) is Go" docs,go \
+'internal/x.go
+docs/x.md'
 areas "no trailing newline, CRLF" docs,go $'README.md\r\nmain.go'
 
 # verdict NAME WANT(0|1) NEEDS_JSON

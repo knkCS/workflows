@@ -20,7 +20,8 @@
 # go-service-ci's `changes` job calls this; tests/change-areas/run.sh is its
 # fixture self-test. The rules (knkCS/workflows#21):
 #
-#   docs   **/*.md, docs/**, .scratch/**, LICENSE*, issue and PR templates
+#   docs   **/*.md, docs/**, .scratch/**, licence files (a basename of
+#          LICENSE, LICENSE.txt or LICENSE-<NAME>), issue and PR templates
 #          under .github/, the release-please manifest.
 #          Never docs, whatever the extension: **/testdata/**, **/fixtures/**,
 #          **/__fixtures__/**, anything matching --docs-exclude.
@@ -68,9 +69,15 @@ never_docs() {
 
 is_docs() {
   case $1 in
-    *.md|docs/*|.scratch/*|LICENSE*|*/LICENSE*) return 0 ;;
+    *.md|docs/*|.scratch/*) return 0 ;;
     .github/ISSUE_TEMPLATE/*|.github/PULL_REQUEST_TEMPLATE*|.github/pull_request_template*) return 0 ;;
     .release-please-manifest.json) return 0 ;;
+  esac
+  # A licence file, judged by its basename alone: `LICENSE*` over the whole path
+  # would also match web/src/LICENSE-modal.tsx or LICENSES/gen.ts, which are code.
+  case ${1##*/} in
+    LICENSE-*.*) return 1 ;;
+    LICENSE|LICENSE.txt|LICENSE-*|LICENCE|LICENCE.txt|COPYING) return 0 ;;
   esac
   return 1
 }
@@ -112,7 +119,7 @@ while IFS= read -r f || [ -n "$f" ]; do
 
   # .claude/ (agent hooks, settings, skills) is deliberately in no area, so it
   # turns everything on — even its Markdown and any Go file in it.
-  case $f in .claude/*) echo "change-areas: $f is under .claude/, which is in no area; counting it as every area" >&2; all; continue ;; esac
+  case $f in .claude/*|*/.claude/*) echo "change-areas: $f is under .claude/, which is in no area; counting it as every area" >&2; all; continue ;; esac
 
   # *.go next: a Go file is Go wherever it lives, docs/ and web/ included.
   case $f in *.go) go=true; continue ;; esac

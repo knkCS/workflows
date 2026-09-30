@@ -63,16 +63,18 @@ files into **change areas** — docs, Go, UI, image — and ends with `ci-ok`, t
   allows it — see ADR 0002). It always runs, is red if any job that ran failed
   or was cancelled, and is green when jobs were skipped by change detection. In
   the checks list it appears under the caller's job name, e.g. `ci / ci-ok`.
-  Requiring the individual jobs instead would leave a docs-only PR waiting
-  forever on checks that were skipped.
+  Do not require the individual jobs instead: GitHub reports a skipped job to
+  branch protection as passing, whether change detection skipped it or a
+  failure upstream did, so only `ci-ok` knows which skip was legitimate.
 - **The file list comes from the API**, not a checkout, so no deep fetch. A
-  non-PR event (push, `workflow_dispatch`) means every area.
+  renamed file counts under both its old and its new path. A non-PR event
+  (push, `workflow_dispatch`) means every area.
 - **When in doubt, every area.** A file in no known area — a Makefile, a
   workflow, a chart, anything under `.claude/` — turns on every area, as does
   an empty or truncated (300+ files) change set. Change detection can only ever
   run too much, never too little.
 
-What counts as **docs**: `**/*.md`, `docs/**`, `.scratch/**`, `LICENSE*`, issue
+What counts as **docs**: `**/*.md`, `docs/**`, `.scratch/**`, licence files (`LICENSE`, `LICENSE.txt`, `LICENSE-MIT`, …), issue
 and PR templates under `.github/`, and `.release-please-manifest.json`. Never
 docs, whatever the extension: `**/testdata/**`, `**/fixtures/**`,
 `**/__fixtures__/**`, and anything matching the `docs-exclude` input — a

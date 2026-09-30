@@ -48,7 +48,8 @@ jobs:
   # already has — the PR-files endpoint would need `pull-requests: read`, and a
   # reusable workflow asking for more than its caller grants fails at startup.
   # A non-PR event (push, dispatch) has no change set and means every area, as
-  # does anything the API cannot answer in full.
+  # does anything the API cannot answer in full. A renamed file contributes
+  # both its old and new path: moving internal/x.go to docs/x.md deletes Go.
   #
   # Today only a docs-only PR skips anything: the jobs below run unless
   # `docs-only` is true. Per-area gating of the Go and UI jobs is #24.
@@ -92,7 +93,7 @@ jobs:
             areas=$(printf '%s\n' "$TEST_CHANGED_FILES" | classify)
           elif [ "$EVENT" != pull_request ] && [ "$EVENT" != pull_request_target ]; then
             areas=$(every_area "no pull request in context ($EVENT)")
-          elif ! compare=$(gh api "repos/${REPO}/compare/${BASE_SHA}...${HEAD_SHA}" --jq '{n: (.files | length), files: [.files[].filename]}'); then
+          elif ! compare=$(gh api "repos/${REPO}/compare/${BASE_SHA}...${HEAD_SHA}" --jq '{n: (.files | length), files: [.files[] | .filename, (.previous_filename // empty)]}'); then
             echo "::warning::could not list the pull request's changed files"
             areas=$(every_area "no change set")
           elif [ "$(jq '.n' <<<"$compare")" -ge 300 ]; then
