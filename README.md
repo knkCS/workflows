@@ -6,7 +6,25 @@ repos in either org can reference them on the GitHub free tier (private
 cross-org reuse requires Enterprise).
 
 These workflows contain **no secrets** — callers pass tokens (e.g. `CI_TOKEN`)
-via `secrets:` / `secrets: inherit` at call time.
+via `secrets:` at call time.
+
+**Adopting this repo?** Start with the adoption guide,
+[`docs/adopting.md`](docs/adopting.md): copy the caller templates for your
+publish model from [`templates/`](templates/), set up `CI_TOKEN`, and audit
+the repo against its anti-pattern checklist. It also holds the adoption status
+of every caller in both orgs.
+
+## Caller templates (`templates/`)
+
+Ready-to-copy caller workflows, one wiring per publish model — triggers,
+concurrency, which reusable workflows to call and in what order. Not run in
+this repo; linted and checked by its self-test.
+
+| Template | Copy to | What it wires |
+|---|---|---|
+| `pr.yml` | `.github/workflows/ci.yml` | The PR suite (both publish models) |
+| `commitlint.yml` | `.github/workflows/commitlint.yml` | Conventional-commit linting |
+| `release/main.yml` | `.github/workflows/main.yml` | Release model: merge check → release-please → `publish-image-chart` / `publish-ui` |
 
 ## Reusable workflows (`.github/workflows/`)
 
@@ -20,9 +38,13 @@ via `secrets:` / `secrets: inherit` at call time.
 | `argocd-rendering-check.yml` | Render a deploy repo's ArgoCD Applications with their real value files and schema-validate the output |
 
 `self-test.yml` is not reusable: it is this repo's own CI. On every PR that
-touches a workflow, a script or a test it runs actionlint over every workflow
-(configured by `.github/actionlint.yaml`), `tests/workflow-timeouts/run.sh`
-(every job declares the agreed timeout), and each engine script's fixture
+touches a workflow, a caller template, a script or a test it runs actionlint
+over every workflow and every caller template (configured by
+`.github/actionlint.yaml`), `tests/caller-templates/run.sh` (every template
+pins `@v1`, passes only inputs and secrets the called workflow declares,
+cancels on PRs only, and gates `main` on the merge check),
+`tests/workflow-timeouts/run.sh` (every job declares the agreed timeout), and
+each engine script's fixture
 self-test (`tests/rendering-check/run.sh`, `tests/change-areas/run.sh`). It
 also calls `go-service-ci.yml` from the PR's own commit with five fixed change
 sets — docs-only, Go-only (in both test modes), UI-only and image-only — against the
@@ -287,19 +309,13 @@ values typo.
 
 ## Versioning
 
-Pin `@v1`. `v1` is a **moving major-version tag** — it advances on
-backward-compatible changes; breaking changes will introduce `v2`.
+Pin `@v1` — never a SHA or `@main` ([ADR 0003](docs/adr/0003-callers-pin-v1-only.md)).
+`v1` is a **moving major-version tag** — it advances on backward-compatible
+changes; breaking changes will introduce `v2`.
 
 ## Usage
 
-```yaml
-jobs:
-  publish:
-    uses: knkcs/workflows/.github/workflows/publish-image-chart.yml@v1
-    with:
-      chart-path: charts/<name>
-      chart-name: <name>
-      version: ${{ needs.release-please.outputs... }}
-    secrets:
-      CI_TOKEN: ${{ secrets.CI_TOKEN }}
-```
+Copy the caller templates in [`templates/`](templates/) and follow
+[`docs/adopting.md`](docs/adopting.md); the release model's
+[`templates/release/main.yml`](templates/release/main.yml) shows how
+`publish-image-chart` and `publish-ui` are gated on release-please's outputs.

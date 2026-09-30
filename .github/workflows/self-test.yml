@@ -2,10 +2,18 @@ name: Self-test
 # Repo-local CI: this repo's reusable workflows are consumed by every other
 # repo's CI, but nothing exercised THEM on their own PRs — a broken engine
 # script or workflow would land silently and only fail in a caller. This
-# workflow runs on PRs that touch a workflow, a script or a test:
+# workflow runs on PRs that touch a workflow, a caller template, a script or a
+# test:
 #
-# - `actionlint` lints every workflow in .github/workflows/ (expressions, input
-#   types, runner labels, and — via the runner's shellcheck — `run:` scripts).
+# - `actionlint` lints every workflow in .github/workflows/ and every caller
+#   template under templates/ (expressions, input types, runner labels, and —
+#   via the runner's shellcheck — `run:` scripts).
+# - `caller-templates` (tests/caller-templates/run.sh) checks what actionlint
+#   cannot see across the `@v1` boundary: every input and secret a template
+#   passes is one the called workflow here declares (no test-only inputs), every
+#   call is pinned `@v1`, runs cancel on PRs and queue on `main`, and a `main`
+#   template gates everything on the merge check — the release one gating
+#   release-please on it and each publish job on release-please's outputs.
 # - `workflow-timeouts` (tests/workflow-timeouts/run.sh) proves every job
 #   declares `timeout-minutes` with the agreed defaults, so no job can run to
 #   GitHub's 6-hour limit again.
@@ -48,6 +56,7 @@ on:
     paths:
       - .github/workflows/**
       - .github/actionlint.yaml
+      - templates/**
       - scripts/**
       - tests/**
       - package.json
@@ -69,8 +78,12 @@ jobs:
           curl -sSfL -o "$RUNNER_TEMP/actionlint.tgz" \
             "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
           tar -xzf "$RUNNER_TEMP/actionlint.tgz" -C "$RUNNER_TEMP" actionlint
-      - name: Lint workflows
-        run: '"$RUNNER_TEMP/actionlint" -color'
+      # Explicit paths: with none, actionlint lints .github/workflows/ only,
+      # and the caller templates are workflows too (in the caller, once copied).
+      - name: Lint workflows and caller templates
+        run: |
+          mapfile -t files < <(find .github/workflows templates -type f \( -name '*.yml' -o -name '*.yaml' \) | sort)
+          "$RUNNER_TEMP/actionlint" -color "${files[@]}"
 
   workflow-timeouts:
     runs-on: ubuntu-latest
@@ -81,6 +94,16 @@ jobs:
         run: python3 -c 'import yaml' 2>/dev/null || python3 -m pip install --user pyyaml
       - name: Check every job declares its timeout
         run: bash tests/workflow-timeouts/run.sh
+
+  caller-templates:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - name: Ensure PyYAML
+        run: python3 -c 'import yaml' 2>/dev/null || python3 -m pip install --user pyyaml
+      - name: Check the caller templates against the workflows they call
+        run: bash tests/caller-templates/run.sh
 
   rendering-check:
     runs-on: ubuntu-latest
