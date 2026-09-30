@@ -2,10 +2,12 @@ name: Self-test
 # Repo-local CI: this repo's reusable workflows are consumed by every other
 # repo's CI, but nothing exercised THEM on their own PRs — a broken engine
 # script or workflow would land silently and only fail in a caller. This
-# workflow runs on PRs that touch a workflow, a script or a test:
+# workflow runs on PRs that touch a workflow, a caller template, a script or a
+# test:
 #
-# - `actionlint` lints every workflow in .github/workflows/ (expressions, input
-#   types, runner labels, and — via the runner's shellcheck — `run:` scripts).
+# - `actionlint` lints every workflow in .github/workflows/ and every caller
+#   template under templates/ (expressions, input types, runner labels, and —
+#   via the runner's shellcheck — `run:` scripts).
 # - `workflow-timeouts` (tests/workflow-timeouts/run.sh) proves every job
 #   declares `timeout-minutes` with the agreed defaults, so no job can run to
 #   GitHub's 6-hour limit again.
@@ -20,6 +22,9 @@ name: Self-test
 #   conservative one, a file in no known area turns on every area — and the
 #   suite verdict behind its `ci-ok` job (green on pass/skipped, red on
 #   failure/cancelled).
+# - `staging-tag` (tests/staging-tag/run.sh) proves staging-image's deploy-repo
+#   update against a throwaway local deploy repo: only `image.tag` rewritten, a
+#   no-op when already at the SHA, a lost push race retried on the new tip.
 # - `docs-only-suite`, `go-only-suite`, `services-suite`, `ui-only-suite` and
 #   `image-only-suite` call go-service-ci from THIS commit (local path), each
 #   with a fixed change set from its test-only `test-changed-files` input, and
@@ -48,6 +53,7 @@ on:
     paths:
       - .github/workflows/**
       - .github/actionlint.yaml
+      - templates/**
       - scripts/**
       - tests/**
       - package.json
@@ -71,6 +77,14 @@ jobs:
           tar -xzf "$RUNNER_TEMP/actionlint.tgz" -C "$RUNNER_TEMP" actionlint
       - name: Lint workflows
         run: '"$RUNNER_TEMP/actionlint" -color'
+      # actionlint only finds .github/workflows/ by itself; the caller
+      # templates are named explicitly.
+      - name: Lint caller templates
+        run: |
+          shopt -s globstar nullglob
+          templates=(templates/**/*.yml templates/**/*.yaml)
+          if [ "${#templates[@]}" -eq 0 ]; then echo "::error::no caller templates found under templates/"; exit 1; fi
+          "$RUNNER_TEMP/actionlint" -color "${templates[@]}"
 
   workflow-timeouts:
     runs-on: ubuntu-latest
@@ -102,6 +116,14 @@ jobs:
       - uses: actions/checkout@v6
       - name: Run change-area classifier and suite verdict self-test
         run: bash tests/change-areas/run.sh
+
+  staging-tag:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - name: Run staging tag update self-test
+        run: bash tests/staging-tag/run.sh
 
   # The PR suite end to end: go-service-ci called from THIS commit (local
   # path) with five fixed change sets (its test-only `test-changed-files`

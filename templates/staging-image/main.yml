@@ -1,0 +1,49 @@
+# Caller template — staging image publish model, `main` workflow.
+#
+# For a knkcms repo whose staging follows `main`: every push to `main` runs the
+# merge check, and only a green merge check publishes a staging image — built
+# natively for amd64 + arm64, tagged with the commit SHA and `latest`, chart
+# pushed — and writes the SHA into the service's staging values in the deploy
+# repo. Copy to `.github/workflows/main.yml` and replace every <service>.
+#
+# Before adopting: the Dockerfile must read CI_TOKEN as the BuildKit secret
+# `ci_token` (`RUN --mount=type=secret,id=ci_token ...`), not a build-arg, and
+# build arm64 natively (see README, "staging-image.yml").
+name: Main
+
+on:
+  push:
+    branches: [main]
+
+# `main` queues and never cancels: a cancelled run can leave an image pushed
+# and the deploy repo not updated. (The expression is the shared rule of every
+# caller template; it is true only for pull_request events.)
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  merge-check:
+    uses: knkcs/workflows/.github/workflows/go-service-ci.yml@v1
+    with:
+      mode: merge-check
+      # The same layout inputs as the PR suite, e.g.:
+      helm-chart: charts/<service>
+    secrets:
+      CI_TOKEN: ${{ secrets.CI_TOKEN }}
+
+  staging-image:
+    needs: merge-check
+    uses: knkcs/workflows/.github/workflows/staging-image.yml@v1
+    with:
+      chart-path: charts/<service>
+      chart-name: <service>
+      staging-values-path: environments/staging/services/<service>-values.yaml
+    secrets:
+      # Read access to the private modules the image build fetches, and
+      # contents: write on knkcms/deploy.
+      CI_TOKEN: ${{ secrets.CI_TOKEN }}

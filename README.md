@@ -16,14 +16,17 @@ via `secrets:` / `secrets: inherit` at call time.
 | `commitlint.yml` | Conventional-commit linting |
 | `release-please.yml` | release-please PR + release automation |
 | `publish-image-chart.yml` | Build+push image and Helm chart to GHCR |
+| `staging-image.yml` | Publish a **staging image** (commit SHA + `latest`) and chart, and point the deploy repo's staging values at it |
 | `publish-ui.yml` | Publish a UI npm package to a configurable registry (public npm or GitHub Packages) |
 | `argocd-rendering-check.yml` | Render a deploy repo's ArgoCD Applications with their real value files and schema-validate the output |
 
 `self-test.yml` is not reusable: it is this repo's own CI. On every PR that
-touches a workflow, a script or a test it runs actionlint over every workflow
-(configured by `.github/actionlint.yaml`), `tests/workflow-timeouts/run.sh`
+touches a workflow, a caller template, a script or a test it runs actionlint
+over every workflow and every caller template under `templates/` (configured by
+`.github/actionlint.yaml`), `tests/workflow-timeouts/run.sh`
 (every job declares the agreed timeout), and each engine script's fixture
-self-test (`tests/rendering-check/run.sh`, `tests/change-areas/run.sh`). It
+self-test (`tests/rendering-check/run.sh`, `tests/change-areas/run.sh`,
+`tests/staging-tag/run.sh`). It
 also calls `go-service-ci.yml` from the PR's own commit with five fixed change
 sets — docs-only, Go-only (in both test modes), UI-only and image-only — against the
 fixtures in `tests/go-service-ci/`, and checks that each ran exactly the jobs
@@ -49,11 +52,13 @@ slow but healthy run is plausible, a caller can raise the timeout with a
 | `go-service-ci.yml` | `ui-timeout-minutes` | `15` | `ui` |
 | `go-service-ci.yml` | `image-timeout-minutes` | `30` | `image` |
 | `publish-image-chart.yml` | `build-timeout-minutes` | `30` | each `build` leg (amd64, arm64) |
+| `staging-image.yml` | `build-timeout-minutes` | `30` | each `build` leg of its `publish` call (amd64, arm64) |
 | `publish-ui.yml` | `ui-timeout-minutes` | `15` | `publish` |
 | `argocd-rendering-check.yml` | `render-timeout-minutes` | `10` | `render` |
 
 Fixed at 10: `go-service-ci`'s `changes` and `ci-ok`, `publish-image-chart`'s
-`merge`, `commitlint`, `release-please`. In `go-service-ci`, the `go` job's
+`merge` (also as `staging-image`'s), `staging-image`'s `update-staging`,
+`commitlint`, `release-please`. In `go-service-ci`, the `go` job's
 40 minutes sits above the 30m `test-timeout` so that `go test`'s own timeout,
 with its stack dump, fires first — raise the two together.
 
@@ -277,6 +282,96 @@ reference for the exact source shapes and semantics. Its fixture self-test
 (`tests/rendering-check/run.sh`, run by `self-test.yml`) proves the check green
 on a correct layout and red on a missing value file and on a schema-breaking
 values typo.
+
+### `staging-image.yml`: the staging image publish model
+
+The knkcms publish model: staging follows `main`, so every push to `main`
+publishes a **staging image** and points staging at it — no release, no
+version. It replaces the hand-rolled `release.yaml` + `update-staging` jobs of
+knkcms/layout and knkcms/template. Run it after the merge check, as the caller
+template [`templates/staging-image/main.yml`](templates/staging-image/main.yml)
+does:
+
+```yaml
+on:
+  push:
+    branches: [main]
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}  # main queues
+permissions:
+  contents: read
+  packages: write
+jobs:
+  merge-check:
+    uses: knkcs/workflows/.github/workflows/go-service-ci.yml@v1
+    with:
+      mode: merge-check
+    secrets:
+      CI_TOKEN: ${{ secrets.CI_TOKEN }}
+  staging-image:
+    needs: merge-check
+    uses: knkcs/workflows/.github/workflows/staging-image.yml@v1
+    with:
+      chart-path: charts/layout
+      chart-name: layout
+      staging-values-path: environments/staging/services/layout-values.yaml
+    secrets:
+      CI_TOKEN: ${{ secrets.CI_TOKEN }}
+```
+
+1. **Image and chart.** Its `publish` job calls `publish-image-chart.yml` from
+   the same commit with `version` set to the commit SHA, so the build is the
+   release model's: each architecture on its own native runner (amd64 on
+   `ubuntu-latest`, arm64 on `ubuntu-24.04-arm`, never QEMU —
+   [ADR 0001](docs/adr/0001-arm64-is-a-developer-platform-built-natively.md)),
+   GHA-cached per architecture, pushed by digest and merged into one manifest
+   tagged `<sha>` and `latest`. `CI_TOKEN` reaches the build only as the
+   BuildKit secret `ci_token`, so the Dockerfile must mount it
+   (`RUN --mount=type=secret,id=ci_token …`) instead of reading a `GH_TOKEN`
+   build-arg. The chart is pushed at the version its `Chart.yaml` declares
+   (`keep-chart-version`), and tagged `latest`.
+2. **Deploy repo.** `update-staging` checks out `deploy-repo` with `CI_TOKEN`,
+   writes the SHA into the top-level `image.tag` of `staging-values-path` —
+   no other `tag:` line in the file — and commits it as `github-actions[bot]`
+   with `chore: update <chart-name> image to <sha>`. Already at the SHA, it
+   commits nothing. When another service's update wins the push race, it
+   fetches the new tip, applies the edit again on top of it and retries (up to
+   5 attempts). A values file without `image.tag` fails the run. The script is
+   `scripts/update-staging-tag.sh`; its self-test is `tests/staging-tag/run.sh`.
+
+| Input | Type | Default | Effect |
+|---|---|---|---|
+| `chart-path` | string | — (required) | Chart directory, e.g. `charts/layout` |
+| `chart-name` | string | — (required) | Chart name, e.g. `layout`; also names the service in the deploy commit |
+| `staging-values-path` | string | — (required) | Values file in the deploy repo whose `image.tag` is set, e.g. `environments/staging/services/layout-values.yaml` |
+| `deploy-repo` | string | `knkcms/deploy` | Deploy repo to update, on its default branch |
+| `build-timeout-minutes` | number | `30` | Job timeout per native build leg |
+
+`CI_TOKEN` needs read access to the private modules the image build fetches
+and `contents: write` on `deploy-repo`. Keep `main`'s concurrency from ever
+cancelling (the template's rule): a cancelled run can leave the image pushed
+and staging not pointed at it.
+
+### `publish-image-chart.yml` inputs
+
+| Input | Type | Default | Effect |
+|---|---|---|---|
+| `chart-path` | string | — (required) | Chart directory |
+| `chart-name` | string | — (required) | Chart name |
+| `version` | string | — (required) | Image tag (beside `latest`), and the chart's version and appVersion (no leading `v`) |
+| `ref` | string | `""` | Git ref to build from; empty means the triggering commit |
+| `build-timeout-minutes` | number | `30` | Job timeout per native build leg |
+| `keep-chart-version` | boolean | `false` | Package the chart at its own `Chart.yaml` version and appVersion instead of `version`; `staging-image.yml` sets it, since a SHA is no chart version |
+
+## Caller templates (`templates/`)
+
+Ready-to-copy workflow files, one directory per publish model, each showing the
+whole wiring for that model. `self-test.yml` lints them with actionlint.
+
+| Template | Publish model |
+|---|---|
+| `templates/staging-image/main.yml` | Staging image: merge check → `staging-image.yml` on every push to `main` |
 
 ## Composite actions (`actions/`)
 

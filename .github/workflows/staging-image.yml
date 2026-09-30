@@ -1,0 +1,76 @@
+name: Staging image
+# Publishes a **staging image** (see CONTEXT.md) — the knkcms publish model,
+# where staging follows `main`: on every push to `main` (after the merge
+# check, see templates/staging-image/main.yml) it
+#
+#   1. builds the image natively for linux/amd64 and linux/arm64 (ADR 0001:
+#      each arch on its own native runner, never QEMU), GHA-cached per arch,
+#      with CI_TOKEN only as the BuildKit secret `ci_token`, and tags it with
+#      the commit SHA and `latest`; then pushes the chart at the version its
+#      Chart.yaml declares, also as `latest` — all by calling
+#      publish-image-chart.yml from this same commit, so the build and the
+#      manifest merge exist once for both publish models;
+#   2. writes the SHA into the service's staging values in the deploy repo
+#      (`image.tag` only) and commits it as github-actions[bot], retrying on
+#      top of the new tip when another service's update won the push race
+#      (scripts/update-staging-tag.sh; its self-test is tests/staging-tag/).
+#
+# A run of a commit already in the values file commits nothing.
+on:
+  workflow_call:
+    inputs:
+      chart-path:          { type: string, required: true }   # e.g. charts/layout
+      chart-name:          { type: string, required: true }   # e.g. layout
+      staging-values-path: { type: string, required: true }   # e.g. environments/staging/services/layout-values.yaml
+      deploy-repo:         { type: string, default: knkcms/deploy }  # updated on its default branch
+      build-timeout-minutes: { type: number, default: 30 }    # per native build leg; the other jobs are fixed at 10
+    secrets:
+      # Read access to the private modules the image build fetches (BuildKit
+      # secret `ci_token`), and contents: write on `deploy-repo`.
+      CI_TOKEN: { required: true }
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    uses: ./.github/workflows/publish-image-chart.yml
+    with:
+      chart-path: ${{ inputs.chart-path }}
+      chart-name: ${{ inputs.chart-name }}
+      version: ${{ github.sha }}
+      keep-chart-version: true
+      build-timeout-minutes: ${{ inputs.build-timeout-minutes }}
+    secrets:
+      CI_TOKEN: ${{ secrets.CI_TOKEN }}
+
+  update-staging:
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # The script comes from the same commit as this workflow, so the two can
+      # never skew (go-service-ci's pattern; the fallback ref exists only for
+      # contexts that leave the SHA empty).
+      - uses: actions/checkout@v6
+        with:
+          repository: knkcs/workflows
+          ref: ${{ job.workflow_sha || 'v1' }}
+          path: .knkcs-workflows
+          sparse-checkout: scripts
+      - uses: actions/checkout@v6
+        with:
+          repository: ${{ inputs.deploy-repo }}
+          token: ${{ secrets.CI_TOKEN }}
+          path: .deploy
+      - name: Write the SHA into the staging values
+        env:
+          VALUES: ${{ inputs.staging-values-path }}
+          TAG: ${{ github.sha }}
+          MESSAGE: "chore: update ${{ inputs.chart-name }} image to ${{ github.sha }}"
+        run: |
+          git -C .deploy config user.name "github-actions[bot]"
+          git -C .deploy config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          bash .knkcs-workflows/scripts/update-staging-tag.sh \
+            --dir .deploy --values "$VALUES" --tag "$TAG" --message "$MESSAGE"

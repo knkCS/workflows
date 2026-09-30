@@ -9,6 +9,8 @@
 #      tests (above go-service-ci's 30m `test-timeout`), 30 per image build
 #      (each publish leg and go-service-ci's `image` check), 15 for UI, 10 for
 #      everything else;
+#      A job that calls another workflow of this repo (staging-image's
+#      `publish` calls publish-image-chart) is bounded by that workflow's jobs;
 #   3. the jobs where a slow but healthy run is plausible take their timeout
 #      from a `number` input, so a caller can raise it; the rest are fixed.
 #
@@ -38,6 +40,7 @@ EXPECTED = {
     ("go-service-ci.yml", "ci-ok"):                (10, None),
     ("publish-image-chart.yml", "build"):          (30, "build-timeout-minutes"),
     ("publish-image-chart.yml", "merge"):          (10, None),
+    ("staging-image.yml", "update-staging"):       (10, None),
     ("publish-ui.yml", "publish"):                 (15, "ui-timeout-minutes"),
     ("commitlint.yml", "commitlint"):              (10, None),
     ("release-please.yml", "release-please"):      (10, None),
