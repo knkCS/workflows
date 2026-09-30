@@ -30,6 +30,13 @@ name: Self-test
 #   tests/go-service-ci/ are modules in subdirectories (`working-directory`),
 #   one of whose tests needs the `services` containers, and the UI fixture is
 #   a workspace of the root package.json.
+# - `merge-check-suite`, `merge-check-go-error-suite` and
+#   `merge-check-ui-error-suite` call it in `merge-check` mode: green on clean
+#   fixtures with no test run and no service container started, and — read
+#   back step by step by `suites-check` — failing Vet on a Go compile error
+#   and the UI typecheck on a type error. The two failing ones set the
+#   test-only `test-soft-fail`, so the failure is recorded on the step while
+#   this run stays green.
 #
 # Every job runs on every matching PR: the checks are cheap, and a path filter
 # per job would be one more place for a real check to be skipped.
@@ -178,8 +185,62 @@ jobs:
     secrets:
       CI_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # never used: npm-github-packages is off and the Go job must not run
 
+  # The merge check (`mode: merge-check`), green: vet, helm lint and the UI
+  # build + typecheck in the one `go` job, which the checks list names
+  # `merge-check`. Its Go module vets clean but its one test always fails, and
+  # `test-mode: services` is set, so a green job proves no test ran; the
+  # step list in suites-check proves no service container started. The change
+  # set is docs-only — it would skip every job in a PR suite — to prove the
+  # merge check ignores change areas.
+  merge-check-suite:
+    uses: ./.github/workflows/go-service-ci.yml
+    with:
+      mode: merge-check
+      test-changed-files: README.md
+      test-mode: services
+      go-version-file: tests/go-service-ci/go-merge-check-module/go.mod
+      working-directory: tests/go-service-ci/go-merge-check-module
+      helm-chart: tests/rendering-check/fixtures/demo-chart
+      ui-package: tests/go-service-ci/ui-package
+      check-ent-drift: false
+      check-gofmt: true
+      embed-frontend: true
+    secrets:
+      CI_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # The merge check on two changes that do not compile together. With
+  # `test-soft-fail` the failing step does not fail the job — a failed job
+  # would be a red check on this PR — so suites-check reads the step results:
+  # Vet must fail on the Go fixture's `undefined: Greet`, the UI steps pass.
+  merge-check-go-error-suite:
+    uses: ./.github/workflows/go-service-ci.yml
+    with:
+      mode: merge-check
+      test-soft-fail: true
+      go-version-file: tests/go-service-ci/go-compile-error-module/go.mod
+      working-directory: tests/go-service-ci/go-compile-error-module
+      ui-package: tests/go-service-ci/ui-package
+      check-ent-drift: false
+    secrets:
+      CI_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # The merge check on a UI type error. The fixture's build emits without
+  # type checking, as a Vite build does, so the build passes and only the
+  # typecheck step must fail; Vet passes on the clean Go fixture.
+  merge-check-ui-error-suite:
+    uses: ./.github/workflows/go-service-ci.yml
+    with:
+      mode: merge-check
+      test-soft-fail: true
+      go-version-file: tests/go-service-ci/go-module/go.mod
+      working-directory: tests/go-service-ci/go-module
+      ui-package: tests/go-service-ci/ui-type-error-package
+      check-ent-drift: false
+    secrets:
+      CI_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   suites-check:
-    needs: [docs-only-suite, go-only-suite, services-suite, ui-only-suite]
+    needs: [docs-only-suite, go-only-suite, services-suite, ui-only-suite, merge-check-suite, merge-check-go-error-suite, merge-check-ui-error-suite]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -192,7 +253,8 @@ jobs:
           JOBS_URL: repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}/jobs
         run: |
           set -euo pipefail
-          jobs=$(gh api --paginate "$JOBS_URL" --jq '.jobs[] | select(.name | test("-suite / ")) | "\(.name)=\(.conclusion)"' | sort)
+          all=$(gh api --paginate "$JOBS_URL" --jq '.jobs[] | select(.name | test("-suite / "))' | jq -s .)
+          jobs=$(jq -r '.[] | "\(.name)=\(.conclusion)"' <<<"$all" | sort)
           printf '%s\n\n' "$jobs"
           # One line per job, "<suite> / <job>=<conclusion>". Every suite must
           # run `changes` and `ci-ok`, both green; the rest is per change set.
@@ -212,10 +274,60 @@ jobs:
             'ui-only-suite / changes=success' \
             'ui-only-suite / go=skipped' \
             'ui-only-suite / ui=success' \
-            'ui-only-suite / ci-ok=success' | sort)
+            'ui-only-suite / ci-ok=success' \
+            'merge-check-suite / changes=success' \
+            'merge-check-suite / merge-check=success' \
+            'merge-check-suite / ui=skipped' \
+            'merge-check-suite / ci-ok=success' \
+            'merge-check-go-error-suite / changes=success' \
+            'merge-check-go-error-suite / merge-check=success' \
+            'merge-check-go-error-suite / ui=skipped' \
+            'merge-check-go-error-suite / ci-ok=success' \
+            'merge-check-ui-error-suite / changes=success' \
+            'merge-check-ui-error-suite / merge-check=success' \
+            'merge-check-ui-error-suite / ui=skipped' \
+            'merge-check-ui-error-suite / ci-ok=success' | sort)
           if [ "$jobs" != "$want" ]; then
             echo "::error::a change set ran the wrong jobs; want:"
             printf '%s\n\n' "$want"
             diff <(printf '%s\n' "$want") <(printf '%s\n' "$jobs") || true
             exit 1
           fi
+      # The merge check's own steps. A soft-failed step (test-soft-fail) keeps
+      # its job green but reports `failure` here, which is what proves the
+      # merge check fails on a compile error and on a UI type error. A step
+      # skipped by its `if:` reports `skipped`; `-` means it is not listed.
+      - name: The merge check vets, builds and typechecks, and runs no tests
+        env:
+          GH_TOKEN: ${{ github.token }}
+          JOBS_URL: repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}/jobs
+        run: |
+          set -euo pipefail
+          all=$(gh api --paginate "$JOBS_URL" --jq '.jobs[] | select(.name | test("^merge-check-.*suite / merge-check$"))' | jq -s .)
+          failed=0
+          # expect SUITE STEP WANT...: the step's conclusion must be one of WANT.
+          expect() {
+            local suite=$1 step=$2 got; shift 2
+            got=$(jq -r --arg job "$suite / merge-check" --arg step "$step" \
+              '[.[] | select(.name == $job) | .steps[] | select(.name == $step) | .conclusion] | first // "-"' <<<"$all")
+            for want in "$@"; do
+              if [ "$got" = "$want" ]; then echo "ok    $suite: $step=$got"; return; fi
+            done
+            echo "::error::$suite: step '$step' is $got, want one of: $*"
+            failed=1
+          }
+          jq -r '.[] | .name as $j | .steps[] | "\($j): \(.name)=\(.conclusion)"' <<<"$all"
+          echo
+          expect merge-check-suite 'Vet' success
+          expect merge-check-suite 'Helm lint' success
+          expect merge-check-suite 'Install UI dependencies' success
+          expect merge-check-suite 'Build UI package' success
+          expect merge-check-suite 'Typecheck UI package' success
+          expect merge-check-suite 'Test' skipped -
+          expect merge-check-suite 'Initialize containers' -
+          expect merge-check-go-error-suite 'Vet' failure
+          expect merge-check-go-error-suite 'Typecheck UI package' success
+          expect merge-check-ui-error-suite 'Vet' success
+          expect merge-check-ui-error-suite 'Build UI package' success
+          expect merge-check-ui-error-suite 'Typecheck UI package' failure
+          exit "$failed"
