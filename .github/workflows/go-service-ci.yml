@@ -28,6 +28,11 @@ on:
       # repo whose go.mod is go/go.mod). Every `run:` step of the Go job runs
       # there; `go-version-file` and `helm-chart` stay root-relative.
       working-directory:   { type: string, default: "." }
+      # Private Go modules outside knkCS and knkcms: GOPRIVATE patterns (comma-,
+      # space- or newline-separated) added to the default
+      # `github.com/knkcs/*,github.com/knkcms/*` that configure-private-modules
+      # sets. Both orgs are always covered; this never replaces them.
+      go-private-extra:    { type: string, default: "" }
       # Opt-in image check: when the image change area changed, the `image`
       # job builds the image (amd64 only, cached, never pushed). The build
       # context is `image-context`, relative to the repo root, and the
@@ -247,9 +252,13 @@ jobs:
           --health-timeout 5s --health-retries 5
     steps:
       - uses: actions/checkout@v6
+      # GOPRIVATE covers github.com/knkcs/* and github.com/knkcms/* (plus
+      # `go-private-extra`), and CI_TOKEN is injected for all of github.com —
+      # so the token must read every private module in the graph.
       - uses: knkcs/workflows/actions/configure-private-modules@v1
         with:
           ci-token: ${{ secrets.CI_TOKEN }}
+          extra-patterns: ${{ inputs.go-private-extra }}
       # setup-go directly rather than the setup-go-node action: the module cache
       # is keyed on the module's own go.sum, which is not at the root when
       # `working-directory` is set. No Node — the embed stub below is all a
