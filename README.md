@@ -383,9 +383,29 @@ and staging not pointed at it.
 | `chart-path` | string | — (required) | Chart directory |
 | `chart-name` | string | — (required) | Chart name |
 | `version` | string | — (required) | Image tag (beside `latest`), and the chart's version and appVersion (no leading `v`) |
-| `ref` | string | `""` | Git ref to build from; empty means the triggering commit |
+| `ref` | string | `""` | Git ref to build from, e.g. `v1.2.3`; empty means the triggering commit. The release template passes the release tag |
 | `build-timeout-minutes` | number | `30` | Job timeout per native build leg |
 | `keep-chart-version` | boolean | `false` | Package the chart at its own `Chart.yaml` version and appVersion instead of `version`; `staging-image.yml` sets it, since a SHA is no chart version |
+
+The image's `COMMIT` build-arg is the commit actually checked out — `ref`'s
+when set — not `github.sha`.
+
+### `publish-ui.yml` inputs
+
+| Input | Type | Default | Effect |
+|---|---|---|---|
+| `package-dir` | string | — (required) | npm workspace package to publish, e.g. `packages/<name>-ui` |
+| `tag-name` | string | — (required) | The release tag, e.g. `<name>-ui-v1.2.3`; the package's `package.json` version must equal it minus `tag-prefix` |
+| `tag-prefix` | string | — (required) | The tag's prefix before the version, e.g. `<name>-ui-v` |
+| `ref` | string | `""` | Git ref to build and publish from, e.g. the release tag; empty means the triggering commit. The release template passes the release tag |
+| `build-script` | string | `build:ui` | npm script that builds the package |
+| `test-script` | string | `test:ui` | npm script run before publishing |
+| `node-ci-flags` | string | `""` | Extra flags for `npm ci` |
+| `registry-url` | string | `https://registry.npmjs.org` | Registry to publish to; `https://npm.pkg.github.com` for GitHub Packages (pass no `NPM_TOKEN` then) |
+| `ui-timeout-minutes` | number | `15` | Job timeout: install, build, test and publish |
+
+Secret `NPM_TOKEN` (optional): auth for `npm publish`; without it the
+workflow's GitHub token is used, which only GitHub Packages accepts.
 
 ## Composite actions (`actions/`)
 

@@ -21,7 +21,10 @@
 #      `main` are the ones PRs restore, and the same layout inputs, so it checks
 #      the same tree;
 #   6. the release `main` template gates release-please on the merge check and
-#      each publish job on a release-please output.
+#      each publish job on a release-please output;
+#   7. every publish job in the release `main` template builds the release
+#      tag — `ref:` set to release-please's `tag_name` output — never the
+#      triggering commit, which a replaced pending run can make a later one.
 #
 # Requires: python3 with PyYAML.
 set -euo pipefail
@@ -216,11 +219,19 @@ if RELEASE_MAIN in docs:
                     fail(where, f"job '{job}' does not depend on release-please")
                 if f"needs.{rp[0]}.outputs" not in str(spec.get("if", "")):
                     fail(where, f"job '{job}' is not gated by an `if:` on release-please's outputs")
+                # 7. Build the release tag, never github.sha: main queues, a
+                # newer push replaces a pending run, and the tag would then
+                # point at a different commit from the one being built.
+                ref = str((spec.get("with") or {}).get("ref", ""))
+                if not ref:
+                    fail(where, f"job '{job}' passes no `ref`: it would build github.sha, not the release tag")
+                elif f"needs.{rp[0]}.outputs" not in ref or "tag_name" not in ref:
+                    fail(where, f"job '{job}' passes ref={ref!r}: it must be release-please's tag_name output")
 
 for rel in docs:
     print(f"  templates/{rel}")
 if failures:
     print("\nFAIL", *failures, sep="\n  ")
     sys.exit(1)
-print("\nPASS: every caller template pins @v1, calls only declared inputs, cancels on PRs only and gates on the merge check")
+print("\nPASS: every caller template pins @v1, calls only declared inputs, cancels on PRs only, gates on the merge check and publishes the release tag")
 PY
