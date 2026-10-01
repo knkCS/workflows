@@ -288,6 +288,17 @@ Every image built by `publish-image-chart`, the `image-check` job of
   (`ENV GOPRIVATE=github.com/knkcs/*,github.com/knkcms/*` in the stage, too.) `image-check` passes
   the secret on every PR build, so a Dockerfile without the mount still
   builds as long as it fetches nothing private.
+
+  Build such an image locally the same way — the secret, never a build-arg —
+  with a token that can read the private modules (your `gh` login does):
+
+  ```bash
+  export GH_TOKEN=$(gh auth token)
+  docker build --secret id=ci_token,env=GH_TOKEN .
+  ```
+
+  A local `make` target that builds the image (knkcms/deploy's `build-*`, a
+  repo's own `docker-build`) must pass it the same way.
 - **Build natively, never under emulation** (ADR 0001). Every published image
   includes `linux/arm64` for developers, and arm64 may only come from a native
   build. `publish-image-chart` builds each architecture on a runner of that
