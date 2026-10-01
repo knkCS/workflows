@@ -56,8 +56,10 @@ its change areas need. Three more calls run the merge check: green on clean
 fixtures with no test run, no service container and no image build, and failing on a
 Go compile error and on a UI type error (read back from the workflow's
 `*-outcome` outputs, with the test-only `test-soft-fail` keeping the run
-green). The root
-`package.json` exists only for the UI fixtures.
+green). Two calls of `publish-ui.yml`, with the test-only `dry-run`, prove
+`npm-github-packages` hands `CI_TOKEN` to `npm ci` and never to `npm publish`,
+and that a caller without it is unchanged. The root
+`package.json` exists only for the UI fixtures and the `publish-ui` probes.
 
 ### Job timeouts
 
@@ -403,9 +405,30 @@ when set — not `github.sha`.
 | `node-ci-flags` | string | `""` | Extra flags for `npm ci` |
 | `registry-url` | string | `https://registry.npmjs.org` | Registry to publish to; `https://npm.pkg.github.com` for GitHub Packages (pass no `NPM_TOKEN` then) |
 | `ui-timeout-minutes` | number | `15` | Job timeout: install, build, test and publish |
+| `npm-github-packages` | boolean | `false` | Authenticate `npm ci` to `npm.pkg.github.com` with `CI_TOKEN`, for a lockfile that installs packages from GitHub Packages (e.g. `@knkcms`) |
+| `dry-run` | boolean | `false` | **Test-only**, for this repo's self-test: `npm publish --dry-run`, so the whole job runs and nothing is published. Callers never set it |
 
 Secret `NPM_TOKEN` (optional): auth for `npm publish`; without it the
 workflow's GitHub token is used, which only GitHub Packages accepts.
+
+Secret `CI_TOKEN` (optional): `read:packages` on GitHub Packages, used only
+with `npm-github-packages` — which refuses to run without it.
+
+**`npm-github-packages` keeps `CI_TOKEN` away from the publish.** setup-node's
+`registry-url` writes an npmrc of its own and points `NPM_CONFIG_USERCONFIG`
+at it, after which npm never reads `~/.npmrc`. So with the input on, the first
+setup-node runs **without** `registry-url`, the job appends only
+`//npm.pkg.github.com/:_authToken=<CI_TOKEN>` to `~/.npmrc` (as go-service-ci's
+`ui` job does) and `npm ci` reads it. After build and test, that line is
+removed and a second setup-node writes the publish registry's npmrc, so
+`npm publish` sees `NPM_TOKEN` (or the GitHub token) and never `CI_TOKEN`. As
+with go-service-ci, the scope→registry mapping
+(`@knkcms:registry=https://npm.pkg.github.com`) belongs in the caller's
+committed `.npmrc`, credential-free — a committed
+`//npm.pkg.github.com/:_authToken=${NPM_TOKEN}` line would shadow the
+credential. Without the input the job is unchanged. The self-test's
+`publish-ui-*` jobs run both variants with `dry-run` and probe the npm
+config `npm ci` and `npm publish` each see (`tests/publish-ui/`).
 
 ## Composite actions (`actions/`)
 

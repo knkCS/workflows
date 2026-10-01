@@ -17,6 +17,20 @@
 # `--access public` is sent to every registry except GitHub Packages, where
 # package visibility is governed by org/repo settings, not the flag.
 #
+# A lockfile that pulls packages from GitHub Packages (e.g. the @knkcms
+# scope) needs `npm-github-packages: true` and the CI_TOKEN secret (with
+# read:packages): `npm ci` then reads the runner's ~/.npmrc, holding only the
+# CI_TOKEN credential for npm.pkg.github.com. setup-node runs first WITHOUT
+# `registry-url` — with it, setup-node points NPM_CONFIG_USERCONFIG at its own
+# npmrc and npm would never read ~/.npmrc — and the publish registry is set up
+# only after the credential is removed again, right before `npm publish`. So
+# CI_TOKEN is in neither the npmrc nor the environment `npm publish` sees, and
+# NPM_TOKEN stays the only credential for public npm. The scope→registry
+# mapping belongs in the caller's committed .npmrc, credential-free.
+#
+# `dry-run: true` runs everything but publishes nothing (`npm publish
+# --dry-run`): the self-test uses it. Callers leave it off.
+#
 # Note: this workflow requests `packages: write`, and a called workflow may
 # not request more than its caller allows — so a caller that restricts
 # GITHUB_TOKEN permissions must grant `packages: write` even when publishing
@@ -38,10 +52,15 @@ on:
       node-ci-flags: { type: string, default: "" }
       registry-url:  { type: string, default: "https://registry.npmjs.org" }  # e.g. https://npm.pkg.github.com
       ui-timeout-minutes: { type: number, default: 15 }  # job timeout: install, build, test and publish
+      npm-github-packages: { type: boolean, default: false }  # authenticate `npm ci` to npm.pkg.github.com with CI_TOKEN
+      dry-run:       { type: boolean, default: false }  # `npm publish --dry-run`: publishes nothing (the self-test's switch)
     secrets:
       # Auth for `npm publish`. Optional: when absent, the workflow's GitHub
       # token is used — sufficient for GitHub Packages, never for public npm.
       NPM_TOKEN: { required: false }
+      # read:packages on GitHub Packages, for `npm ci` only and only with
+      # `npm-github-packages`; never sent to the publish registry.
+      CI_TOKEN: { required: false }
 
 permissions:
   contents: read
@@ -55,6 +74,7 @@ jobs:
       # The secrets context is not allowed in a step-level `if`; hoist the
       # presence test here, where it is.
       NPM_TOKEN_SET: ${{ secrets.NPM_TOKEN != '' }}
+      CI_TOKEN_SET: ${{ secrets.CI_TOKEN != '' }}
     steps:
       # Fail fast on a tokenless publish to anywhere but GitHub Packages:
       # github.token is useless off GitHub and would otherwise be sent to the
@@ -65,15 +85,32 @@ jobs:
         run: |
           echo "::error::NPM_TOKEN is required when registry-url is not GitHub Packages"
           exit 1
+      - name: Refuse npm-github-packages without CI_TOKEN
+        if: ${{ inputs.npm-github-packages && env.CI_TOKEN_SET == 'false' }}
+        run: |
+          echo "::error::npm-github-packages needs the CI_TOKEN secret (read:packages on GitHub Packages)"
+          exit 1
       - uses: actions/checkout@v6
         with:
           ref: ${{ inputs.ref }}
+      # With npm-github-packages, no registry-url here: it would point
+      # NPM_CONFIG_USERCONFIG at setup-node's npmrc, and `npm ci` would never
+      # read the credential in ~/.npmrc. The publish registry is then set up
+      # by the second setup-node below. Without the input — every existing
+      # caller — this step is exactly what it always was.
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-          registry-url: ${{ inputs.registry-url }}
+          registry-url: ${{ !inputs.npm-github-packages && inputs.registry-url || '' }}
           cache: npm
           cache-dependency-path: package-lock.json
+      # Only the credential, as go-service-ci's `ui` job writes it; the token
+      # reaches the script via `env:`, never ${{ }} interpolation into it.
+      - name: Authenticate npm to GitHub Packages
+        if: ${{ inputs.npm-github-packages }}
+        run: echo "//npm.pkg.github.com/:_authToken=${CI_TOKEN}" >> ~/.npmrc
+        env:
+          CI_TOKEN: ${{ secrets.CI_TOKEN }}
       - run: npm ci ${{ inputs.node-ci-flags }}
       - name: Verify version matches tag
         working-directory: ${{ inputs.package-dir }}
@@ -89,6 +126,19 @@ jobs:
         run: npm run ${{ inputs.build-script }}
       - name: Test
         run: npm run ${{ inputs.test-script }}
+      # Belt and braces: the npmrc the next step writes already replaces
+      # ~/.npmrc for every later npm command, but the credential has done its
+      # job, so it goes before anything is published.
+      - name: Remove the GitHub Packages credential
+        if: ${{ inputs.npm-github-packages }}
+        run: sed -i '\|^//npm\.pkg\.github\.com/:_authToken=|d' ~/.npmrc
+      # The publish registry's npmrc (NODE_AUTH_TOKEN, i.e. NPM_TOKEN), which
+      # the first setup-node left out for npm-github-packages.
+      - uses: actions/setup-node@v4
+        if: ${{ inputs.npm-github-packages }}
+        with:
+          node-version: "22"
+          registry-url: ${{ inputs.registry-url }}
       - name: Publish
         working-directory: ${{ inputs.package-dir }}
         # GitHub Packages must not be sent `--access public` (access is decided
@@ -96,6 +146,6 @@ jobs:
         # `cond && flag || ''` (not `cond && '' || flag`): an empty-string
         # middle operand is falsy and would make the expression always yield
         # the flag.
-        run: npm publish ${{ !contains(inputs.registry-url, 'npm.pkg.github.com') && '--access public' || '' }}
+        run: npm publish ${{ !contains(inputs.registry-url, 'npm.pkg.github.com') && '--access public' || '' }} ${{ inputs.dry-run && '--dry-run' || '' }}
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN || github.token }}

@@ -1,0 +1,11 @@
+{
+  "name": "knkcs-workflows-publish-ui-fixture",
+  "version": "1.2.3",
+  "description": "Self-test fixture for publish-ui.yml, published only with dry-run: its prepublishOnly probes the npm credentials npm publish sees. Not a workspace, so the root lockfile is untouched.",
+  "scripts": {
+    "prepublishOnly": "node ../check-npmrc.mjs publish"
+  },
+  "files": [
+    "package.json"
+  ]
+}
