@@ -47,6 +47,12 @@ jobs:
       embed-frontend: false             # true when a go:embed of web/dist must compile
       frontend-build: false             # true to build (and with ui-lint, lint) the `web` workspace
       check-ent-drift: true             # false when the repo has no internal/ent
+      # The UI's `npm ci`. Keep both identical in the `main` template's merge
+      # check, which runs `npm ci` too. npm-github-packages: true when the
+      # lockfile installs anything from GitHub Packages (e.g. @knkcms); `npm ci`
+      # authenticates there with CI_TOKEN (read:packages).
+      npm-github-packages: false
+      node-ci-flags: ""                 # extra `npm ci` flags, e.g. --legacy-peer-deps
       # Opt-in gates, off by default; turning one on is a deliberate change.
       check-gofmt: true
       ui-lint: true
