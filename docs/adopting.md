@@ -58,8 +58,9 @@ it into the wrong file cannot cancel a publish.
 This repo's self-test lints every template with actionlint and runs
 `tests/caller-templates/run.sh`, which checks what actionlint cannot see
 across the `@v1` boundary: every input and secret a template passes is one the
-called workflow declares, every call is `@v1`, and the `main` templates gate
-everything on the merge check.
+called workflow declares, every call is `@v1`, the `main` templates gate
+everything on the merge check, and the merge check passes the PR suite's
+cache, layout and npm inputs.
 
 ## Adopting, step by step
 
@@ -77,7 +78,11 @@ everything on the merge check.
    `working-directory` and `runs-on` the PR suite passes, and the same layout
    inputs (`helm-chart`, `ui-package`, `embed-frontend`, `frontend-build`,
    `check-ent-drift`, `check-gofmt`), so it checks the same tree and warms the
-   caches PRs restore.
+   caches PRs restore. Pass it the same npm inputs too — `npm-github-packages`
+   and `node-ci-flags`: the merge check runs `npm ci` as the PR suite does, so
+   a UI whose lockfile installs from GitHub Packages (e.g. `@knkcms`) needs
+   `npm-github-packages: true` on both calls, or `main` fails at `npm ci` with
+   a 401 while PRs stay green.
 5. **Configure release-please** (release model,
    [below](#release-please-configuration)), or check the deploy repo's
    staging values file (staging image model, [below](#staging-image)).
@@ -187,7 +192,10 @@ merge-check ──► release-please ──► publish-image-chart  (if the root
   `NPM_TOKEN`; without it, `publish-ui` fails at `npm ci` with a 401. The
   token authenticates `npm ci` alone — `npm publish` sees only `NPM_TOKEN`
   (README, `publish-ui.yml` inputs). As for go-service-ci, the scope mapping
-  lives in the committed `.npmrc`, with no credential line in it.
+  lives in the committed `.npmrc`, with no credential line in it. The merge
+  check installs the same lockfile, so `npm-github-packages: true` (and any
+  `node-ci-flags`) goes on the merge-check call as well as the PR suite's
+  ([step 4](#adopting-step-by-step)).
 - **Keep a manual escape hatch** if you want one: a `workflow_dispatch`
   workflow calling `publish-image-chart` with `ref: v<version>` republishes a
   release without a new merge (statushub's `publish-image-manual.yml`).
@@ -249,7 +257,9 @@ merge-check ──► staging-image ──► publish (image + chart) ──► 
 ```
 
 - **The merge check gates it**, exactly as in the release model: staging never
-  receives a `main` that does not compile.
+  receives a `main` that does not compile. It takes the PR suite's inputs as
+  in the release model, `npm-github-packages` and `node-ci-flags` included
+  ([step 4](#adopting-step-by-step)).
 - **The build is the release model's.** `staging-image` calls
   `publish-image-chart` with the SHA as `version`: each architecture on its
   own native runner (ADR 0001), GHA-cached, merged into one manifest tagged

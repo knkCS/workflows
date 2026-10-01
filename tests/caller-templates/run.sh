@@ -18,8 +18,9 @@
 #      with every other job depending on it, directly or through another job;
 #   5. a `main` template's merge check sees the same go-version-file,
 #      working-directory and runs-on as the PR suite, so the caches it saves on
-#      `main` are the ones PRs restore, and the same layout inputs, so it checks
-#      the same tree;
+#      `main` are the ones PRs restore, the same layout inputs, so it checks
+#      the same tree, and the same npm inputs (npm-github-packages,
+#      node-ci-flags), so its `npm ci` installs what the PR suite's does;
 #   6. the release `main` template gates release-please on the merge check and
 #      each publish job on a release-please output;
 #   7. every publish job in the release `main` template builds the release
@@ -58,6 +59,7 @@ CANCEL = "${{ github.event_name == 'pull_request' }}"
 CACHE_KEYS = ("go-version-file", "working-directory", "runs-on")
 LAYOUT_KEYS = ("helm-chart", "ui-package", "embed-frontend", "frontend-build",
                "check-ent-drift", "check-gofmt")
+NPM_KEYS = ("npm-github-packages", "node-ci-flags")
 
 failures = []
 def fail(where, msg):
@@ -76,6 +78,13 @@ def called(workflow):
     doc = yaml.safe_load((wf_dir / workflow).read_text())
     call = trigger(doc).get("workflow_call") or {}
     return call.get("inputs") or {}, call.get("secrets") or {}
+
+def input_value(spec, key, defaults):
+    # The value a call passes for one input, as the called workflow sees it:
+    # an omitted input is its default. Compared literally (an expression is
+    # its string), so `true` and `${{ true }}` differ.
+    passed = spec.get("with") or {}
+    return passed.get(key, defaults.get(key))
 
 def needs_of(spec):
     needs = spec.get("needs") or []
@@ -202,15 +211,16 @@ for rel in docs:
     for job in jobs:
         if job != gate and gate not in ancestors(jobs, job):
             fail(where, f"job '{job}' does not depend on the merge check '{gate}'")
-    # 5. The same cache and layout inputs as the PR suite, compared as the
-    # workflow sees them (an omitted input is its default).
+    # 5. The same cache, layout and npm inputs as the PR suite, compared as
+    # the workflow sees them (an omitted input is its default).
     defaults = {k: (v or {}).get("default") for k, v in called("go-service-ci.yml")[0].items()}
     for pspec in pr_jobs.values():
-        pw, mw = pspec.get("with") or {}, jobs[gate].get("with") or {}
-        for key in CACHE_KEYS + LAYOUT_KEYS:
-            pv, mv = pw.get(key, defaults.get(key)), mw.get(key, defaults.get(key))
+        for key in CACHE_KEYS + LAYOUT_KEYS + NPM_KEYS:
+            pv, mv = input_value(pspec, key, defaults), input_value(jobs[gate], key, defaults)
             if pv != mv:
-                why = "cache keys would differ" if key in CACHE_KEYS else "it would check a different tree"
+                why = ("cache keys would differ" if key in CACHE_KEYS
+                       else "its `npm ci` would not install what the PR suite's does" if key in NPM_KEYS
+                       else "it would check a different tree")
                 fail(where, f"merge check passes {key}={mv!r}, PR suite {pv!r}: {why}")
 
 # 6. The release model: release-please behind the merge check, publishing behind release-please.
