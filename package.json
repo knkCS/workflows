@@ -1,7 +1,12 @@
 {
   "name": "knkcs-workflows-selftest",
   "private": true,
-  "description": "Not a package. Only self-test.yml's go-service-ci suites use this: go-service-ci runs `npm ci` at the repo root, so its fixture workspaces need a root to hang from.",
+  "description": "Not a package. Only self-test.yml uses this: go-service-ci runs `npm ci` at the repo root, so its fixture workspaces need a root to hang from, and publish-ui runs its build and test scripts from the root, so the publish-ui-* jobs' probes are root scripts.",
+  "scripts": {
+    "selftest:publish-ui:install-github-packages": "node tests/publish-ui/check-npmrc.mjs install-github-packages",
+    "selftest:publish-ui:install-default": "node tests/publish-ui/check-npmrc.mjs install-default",
+    "selftest:publish-ui:test": "node -e 0"
+  },
   "workspaces": [
     "tests/go-service-ci/ui-package",
     "tests/go-service-ci/ui-type-error-package"

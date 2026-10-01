@@ -57,6 +57,12 @@ name: Self-test
 #   compile error and the UI typecheck on a type error. The two failing ones set the
 #   test-only `test-soft-fail`, so the failure is recorded on the step while
 #   this run stays green.
+# - `publish-ui-github-packages` and `publish-ui-default` call publish-ui from
+#   THIS commit with its test-only `dry-run` and dummy secrets, and probe
+#   (tests/publish-ui/check-npmrc.mjs) the npm config `npm ci` and `npm
+#   publish` see: with `npm-github-packages`, CI_TOKEN authenticates `npm ci`
+#   and reaches neither the publish's npmrc nor its environment; without it,
+#   nothing changes for existing callers.
 #
 # Every job runs on every matching PR: the checks are cheap, and a path filter
 # per job would be one more place for a real check to be skipped.
@@ -341,6 +347,56 @@ jobs:
       check-ent-drift: false
     secrets:
       CI_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # publish-ui called from THIS commit, twice, with `dry-run` so nothing is
+  # published and dummy secrets so nothing real could be. The fixture package
+  # (tests/publish-ui/package) is no workspace, so the root lockfile — and
+  # every go-service-ci suite above — is untouched. tests/publish-ui/check-npmrc.mjs
+  # runs inside each call twice: as the `build-script`, the step right after
+  # `npm ci`, so it sees the npm config `npm ci` read; and as the fixture's
+  # `prepublishOnly`, which `npm publish --dry-run` still runs, so it sees the
+  # config the publish reads. Either probe failing fails the job.
+  #
+  # With `npm-github-packages`: `npm ci` reads ~/.npmrc (no setup-node npmrc
+  # shadows it) and it holds the CI_TOKEN credential for npm.pkg.github.com;
+  # at publish, npm reads setup-node's public npm npmrc with NPM_TOKEN, and
+  # CI_TOKEN is in no npmrc and no environment variable.
+  publish-ui-github-packages:
+    uses: ./.github/workflows/publish-ui.yml
+    permissions:
+      contents: read
+      packages: write
+    with:
+      package-dir: tests/publish-ui/package
+      tag-name: publish-ui-selftest-v1.2.3
+      tag-prefix: publish-ui-selftest-v
+      build-script: selftest:publish-ui:install-github-packages
+      test-script: selftest:publish-ui:test
+      npm-github-packages: true
+      dry-run: true
+    secrets:
+      # Dummies, the values check-npmrc.mjs looks for. Nothing is installed
+      # from GitHub Packages here, so no real token is needed.
+      CI_TOKEN: publish-ui-selftest-ci-token
+      NPM_TOKEN: publish-ui-selftest-npm-token
+
+  # Without the input — every existing caller: setup-node's npmrc is in force
+  # for `npm ci` as before, and CI_TOKEN, although passed, reaches nothing.
+  publish-ui-default:
+    uses: ./.github/workflows/publish-ui.yml
+    permissions:
+      contents: read
+      packages: write
+    with:
+      package-dir: tests/publish-ui/package
+      tag-name: publish-ui-selftest-v1.2.3
+      tag-prefix: publish-ui-selftest-v
+      build-script: selftest:publish-ui:install-default
+      test-script: selftest:publish-ui:test
+      dry-run: true
+    secrets:
+      CI_TOKEN: publish-ui-selftest-ci-token
+      NPM_TOKEN: publish-ui-selftest-npm-token
 
   suites-check:
     needs: [docs-only-suite, go-only-suite, services-suite, ui-only-suite, image-only-suite, merge-check-suite, merge-check-go-error-suite, merge-check-ui-error-suite]

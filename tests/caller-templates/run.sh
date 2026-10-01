@@ -24,7 +24,14 @@
 #      each publish job on a release-please output;
 #   7. every publish job in the release `main` template builds the release
 #      tag — `ref:` set to release-please's `tag_name` output — never the
-#      triggering commit, which a replaced pending run can make a later one.
+#      triggering commit, which a replaced pending run can make a later one;
+#   8. a publish-ui call with `npm-github-packages: true` passes CI_TOKEN (the
+#      credential its `npm ci` needs), and one without it passes no CI_TOKEN
+#      (publish-ui has no other use for the token, so passing it would only
+#      hand it to a job that ignores it). `dry-run` is test-only.
+#
+# TEMPLATES_DIR overrides templates/ — e.g. a directory holding a caller's own
+# main.yml as release/main.yml, to check that caller against these workflows.
 #
 # Requires: python3 with PyYAML.
 set -euo pipefail
@@ -34,18 +41,18 @@ REPO_ROOT="$(cd "$HERE/../.." && pwd)"
 
 python3 -c 'import yaml' 2>/dev/null || { echo "FATAL: python3 lacks PyYAML" >&2; exit 2; }
 
-python3 - "$REPO_ROOT" <<'PY'
+python3 - "$REPO_ROOT" "${TEMPLATES_DIR:-$REPO_ROOT/templates}" <<'PY'
 import pathlib, re, sys
 import yaml
 
 root = pathlib.Path(sys.argv[1])
-tpl_dir = root / "templates"
+tpl_dir = pathlib.Path(sys.argv[2])
 wf_dir = root / ".github" / "workflows"
 
 PR_SUITE = "pr.yml"
 RELEASE_MAIN = "release/main.yml"
 REQUIRED = {PR_SUITE, RELEASE_MAIN, "commitlint.yml"}
-TEST_ONLY_INPUTS = {"test-changed-files", "test-soft-fail"}
+TEST_ONLY_INPUTS = {"test-changed-files", "test-soft-fail", "dry-run"}
 CALL = re.compile(r"^knkcs/workflows/\.github/workflows/([A-Za-z0-9_.-]+\.ya?ml)@(.+)$", re.I)
 CANCEL = "${{ github.event_name == 'pull_request' }}"
 CACHE_KEYS = ("go-version-file", "working-directory", "runs-on")
@@ -148,6 +155,13 @@ for rel, path in templates.items():
         for name, decl in secrets.items():
             if (decl or {}).get("required") and name not in given:
                 fail(where, f"job '{job}' omits {workflow}'s required secret '{name}'")
+        # 8. publish-ui's CI_TOKEN goes with npm-github-packages, and only with it.
+        if workflow == "publish-ui.yml":
+            gh_packages = passed.get("npm-github-packages") is True
+            if gh_packages and "CI_TOKEN" not in given:
+                fail(where, f"job '{job}' sets npm-github-packages but passes no CI_TOKEN: its `npm ci` cannot authenticate")
+            if "CI_TOKEN" in given and not gh_packages:
+                fail(where, f"job '{job}' passes CI_TOKEN without npm-github-packages: true, which is all publish-ui uses it for")
 
 def calls(rel, workflow):
     matches = {j: CALL.match(str(s.get("uses", ""))) for j, s in (docs.get(rel, {}).get("jobs") or {}).items()}

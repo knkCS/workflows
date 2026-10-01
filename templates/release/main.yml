@@ -110,7 +110,13 @@ jobs:
       tag-name: ${{ fromJSON(needs.release-please.outputs.outputs_json)['<ui-package-path>--tag_name'] }}
       # Build the release tag, not github.sha (see the header).
       ref: ${{ fromJSON(needs.release-please.outputs.outputs_json)['<ui-package-path>--tag_name'] }}
+      # `true` when the lockfile installs anything from GitHub Packages (e.g.
+      # the @knkcms scope), and then pass CI_TOKEN below too: `npm ci`
+      # authenticates there with it. It never reaches `npm publish`.
+      npm-github-packages: false
     secrets:
       # Public npm. For GitHub Packages pass no secret and set
       # `registry-url: https://npm.pkg.github.com` instead (README, publish-ui).
       NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+      # With npm-github-packages only (read:packages):
+      # CI_TOKEN: ${{ secrets.CI_TOKEN }}
