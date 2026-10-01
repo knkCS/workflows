@@ -31,6 +31,11 @@
 #      (publish-ui has no other use for the token, so passing it would only
 #      hand it to a job that ignores it). `dry-run` is test-only.
 #
+# An input set by a `${{ }}` expression is only known at run time: rule 8
+# treats it as possibly true (so CI_TOKEN goes with it), and rule 5 reports a
+# mismatch only between two literals that differ or two expressions that
+# differ textually. The script self-checks both before reading the templates.
+#
 # TEMPLATES_DIR overrides templates/ — e.g. a directory holding a caller's own
 # main.yml as release/main.yml, to check that caller against these workflows.
 #
@@ -81,10 +86,32 @@ def called(workflow):
 
 def input_value(spec, key, defaults):
     # The value a call passes for one input, as the called workflow sees it:
-    # an omitted input is its default. Compared literally (an expression is
-    # its string), so `true` and `${{ true }}` differ.
+    # an omitted input is its default.
     passed = spec.get("with") or {}
     return passed.get(key, defaults.get(key))
+
+def is_expr(value):
+    # A `${{ }}` expression: its value is only known when the workflow runs.
+    return isinstance(value, str) and "${{" in value
+
+def may_be_true(value):
+    return value is True or is_expr(value)
+
+def differs(a, b):
+    # Two input values that certainly differ: both literals that differ, or
+    # both expressions that differ textually. A literal against an expression
+    # may be equal at run time, so it is not reported.
+    return is_expr(a) == is_expr(b) and a != b
+
+def publish_ui_token_problem(passed, given):
+    # publish-ui's CI_TOKEN goes with npm-github-packages, and only with it. An
+    # expression-valued npm-github-packages may be true, so it needs the token.
+    gh_packages = may_be_true(passed.get("npm-github-packages"))
+    if gh_packages and "CI_TOKEN" not in given:
+        return "sets npm-github-packages but passes no CI_TOKEN: its `npm ci` cannot authenticate"
+    if "CI_TOKEN" in given and not gh_packages:
+        return "passes CI_TOKEN without npm-github-packages: true, which is all publish-ui uses it for"
+    return None
 
 def needs_of(spec):
     needs = spec.get("needs") or []
@@ -97,6 +124,28 @@ def ancestors(jobs, name, seen=None):
             seen.add(n)
             ancestors(jobs, n, seen)
     return seen
+
+# Self-checks of the value rules, so a regression in them fails here rather
+# than only when a caller first writes an expression.
+for a, b, want in [
+    (True, True, False), (True, False, True), ("npm ci", "npm ci", False),
+    ("--legacy-peer-deps", None, True),
+    ("${{ vars.GH_PKGS }}", True, False), (False, "${{ vars.GH_PKGS }}", False),
+    ("${{ vars.GH_PKGS }}", "${{ vars.GH_PKGS }}", False),
+    ("${{ vars.GH_PKGS }}", "${{ vars.OTHER }}", True),
+]:
+    if differs(a, b) != want:
+        fail("self-check", f"differs({a!r}, {b!r}) should be {want}")
+for value, token, ok in [
+    (True, True, True), (True, False, False), (False, True, False),
+    (None, True, False), (False, False, True), (None, False, True),
+    ("${{ vars.GH_PKGS == 'true' }}", True, True),
+    ("${{ vars.GH_PKGS == 'true' }}", False, False),
+]:
+    passed = {} if value is None else {"npm-github-packages": value}
+    given = {"CI_TOKEN": "${{ secrets.CI_TOKEN }}"} if token else {}
+    if (publish_ui_token_problem(passed, given) is None) != ok:
+        fail("self-check", f"publish-ui with npm-github-packages={value!r} and{'' if token else ' no'} CI_TOKEN should be {'accepted' if ok else 'refused'}")
 
 templates = {p.relative_to(tpl_dir).as_posix(): p
              for p in sorted(tpl_dir.rglob("*")) if p.suffix in (".yml", ".yaml")}
@@ -166,11 +215,9 @@ for rel, path in templates.items():
                 fail(where, f"job '{job}' omits {workflow}'s required secret '{name}'")
         # 8. publish-ui's CI_TOKEN goes with npm-github-packages, and only with it.
         if workflow == "publish-ui.yml":
-            gh_packages = passed.get("npm-github-packages") is True
-            if gh_packages and "CI_TOKEN" not in given:
-                fail(where, f"job '{job}' sets npm-github-packages but passes no CI_TOKEN: its `npm ci` cannot authenticate")
-            if "CI_TOKEN" in given and not gh_packages:
-                fail(where, f"job '{job}' passes CI_TOKEN without npm-github-packages: true, which is all publish-ui uses it for")
+            problem = publish_ui_token_problem(passed, given)
+            if problem:
+                fail(where, f"job '{job}' {problem}")
 
 def calls(rel, workflow):
     matches = {j: CALL.match(str(s.get("uses", ""))) for j, s in (docs.get(rel, {}).get("jobs") or {}).items()}
@@ -212,12 +259,13 @@ for rel in docs:
         if job != gate and gate not in ancestors(jobs, job):
             fail(where, f"job '{job}' does not depend on the merge check '{gate}'")
     # 5. The same cache, layout and npm inputs as the PR suite, compared as
-    # the workflow sees them (an omitted input is its default).
+    # the workflow sees them (an omitted input is its default). An expression
+    # is only known at run time: see differs().
     defaults = {k: (v or {}).get("default") for k, v in called("go-service-ci.yml")[0].items()}
     for pspec in pr_jobs.values():
         for key in CACHE_KEYS + LAYOUT_KEYS + NPM_KEYS:
             pv, mv = input_value(pspec, key, defaults), input_value(jobs[gate], key, defaults)
-            if pv != mv:
+            if differs(pv, mv):
                 why = ("cache keys would differ" if key in CACHE_KEYS
                        else "its `npm ci` would not install what the PR suite's does" if key in NPM_KEYS
                        else "it would check a different tree")
