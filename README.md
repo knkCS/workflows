@@ -218,6 +218,7 @@ rarely needs them; this repo's self-test reads them.
 | `check-gofmt` | boolean | `false` | Fail the `go` job if any **tracked** Go file under `working-directory` is not gofmt-clean |
 | `runs-on` | string | `ubuntu-latest` | Runner label for the `go` job (the other jobs stay on `ubuntu-latest`). `services` mode needs a Linux runner with Docker |
 | `working-directory` | string | `.` | Where the Go module lives, relative to the repo root (e.g. `go`). Every command of the `go` job runs there; `go-version-file` and `helm-chart` stay root-relative, so pass e.g. `go-version-file: go/go.mod` too |
+| `go-private-extra` | string | `""` | Extra `GOPRIVATE` patterns (comma-, space- or newline-separated), added to the `github.com/knkcs/*,github.com/knkcms/*` default — only for private modules outside both orgs (see [private Go modules](#private-go-modules)) |
 | `image-check` | boolean | `false` | Build the image in the `image` job when the image change area changed: amd64 only, GHA-cached, never pushed, `CI_TOKEN` as the BuildKit secret `ci_token` (see below) |
 | `image-context` | string | `.` | Build context for `image-check`, relative to the repo root; the Dockerfile is `<image-context>/Dockerfile` |
 | `test-timeout-minutes` | number | `40` | Job timeout for the `go` job; keep it above `test-timeout` (see [Job timeouts](#job-timeouts)) |
@@ -390,8 +391,28 @@ and staging not pointed at it.
 
 | Action | Purpose |
 |---|---|
-| `configure-private-modules` | GOPRIVATE + git insteadOf for private module fetch |
+| `configure-private-modules` | GOPRIVATE + git insteadOf for private module fetch (see below) |
 | `setup-go-node` | setup-go (+ optional setup-node) with caching |
+
+### Private Go modules
+
+`configure-private-modules` — run by `go-service-ci`'s `go` job in both modes —
+sets `GOPRIVATE=github.com/knkcs/*,github.com/knkcms/*`, so a module of
+**either org** is fetched straight from git, never through the public proxy or
+checksum database (`GONOPROXY` and `GONOSUMDB` default to `GOPRIVATE`). Go
+matches these patterns case-sensitively, and both orgs' module paths are
+lowercase (`github.com/knkcs/…`, `github.com/knkcms/…`) — the GitHub spelling
+`knkCS` is not a module path. One git `url.insteadOf` puts `ci-token` into
+every `https://github.com/` URL, whatever the org, so what can be fetched is
+decided by the token alone: it must read **every** private repo in the module
+graph (fieldkit's `CI_TOKEN`, for one, must read `knkcms/knkeditor`).
+
+To add private modules outside both orgs, pass `go-private-extra` to
+`go-service-ci` (or `extra-patterns` to the action): comma-, space- or
+newline-separated `GOPRIVATE` patterns appended to the default, which is never
+replaced. A host other than github.com also needs its own credentials, which
+the action does not set up. `tests/private-modules/run.sh` proves all of this
+hermetically.
 
 ## Versioning
 

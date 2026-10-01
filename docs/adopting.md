@@ -111,7 +111,7 @@ What it needs access to — **read-only**, unless noted:
 
 | Used by | For | Access |
 |---|---|---|
-| `go-service-ci` (`go`, `ui`, `image` jobs) | Private Go modules via `configure-private-modules` (sets `GOPRIVATE=github.com/knkcs/*` only) | Contents: read on every private `knkcs/*` repo in the module graph |
+| `go-service-ci` (`go` job) | Private Go modules via `configure-private-modules` (sets `GOPRIVATE=github.com/knkcs/*,github.com/knkcms/*`, plus any `go-private-extra`) | Contents: read on **every** private repo the caller's module graph depends on, in either org — e.g. fieldkit (knkCS) → `knkcms/knkeditor`. A dependency the token cannot read fails the `go` job at module download |
 | `go-service-ci` with `npm-github-packages` | `npm ci` from `npm.pkg.github.com` | `read:packages` for every scope the lockfile pulls (GitHub Packages needs a token even for public packages) |
 | `go-service-ci` `image` job, `publish-image-chart` | The Dockerfile's BuildKit secret `ci_token` | Whatever the Dockerfile fetches with it — normally the same module access as above |
 | `argocd-rendering-check` | Charts pulled from private service repos | Contents: read on each of those repos |
@@ -270,7 +270,7 @@ Every image built by `publish-image-chart`, the `image-check` job of
       rm -f "$GIT_CONFIG_GLOBAL"
   ```
 
-  (`ENV GOPRIVATE=github.com/knkcs/*` in the stage, too.) `image-check` passes
+  (`ENV GOPRIVATE=github.com/knkcs/*,github.com/knkcms/*` in the stage, too.) `image-check` passes
   the secret on every PR build, so a Dockerfile without the mount still
   builds as long as it fetches nothing private.
 - **Build natively, never under emulation** (ADR 0001). Every published image

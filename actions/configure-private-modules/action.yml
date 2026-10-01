@@ -1,14 +1,21 @@
 name: Configure private modules
-description: Set GOPRIVATE and git insteadOf so Go can fetch knkcs private modules.
+description: Set GOPRIVATE and git insteadOf so Go can fetch knkCS and knkcms private modules.
 inputs:
   ci-token:
-    description: PAT with read access to knkcs private repositories.
+    description: PAT with read access to every private repository in the module graph (knkCS and knkcms alike).
     required: true
+  extra-patterns:
+    description: >-
+      Module path patterns to add to GOPRIVATE beside the default
+      github.com/knkcs/*,github.com/knkcms/* (comma-, space- or
+      newline-separated). Only for private modules outside those two orgs.
+    default: ""
 runs:
   using: composite
   steps:
+    # The logic is configure.sh, so tests/private-modules/run.sh can run it.
     - shell: bash
-      run: |
-        echo "GOPRIVATE=github.com/knkcs/*" >> "$GITHUB_ENV"
-        git config --global \
-          url."https://${{ inputs.ci-token }}@github.com/".insteadOf "https://github.com/"
+      run: bash "$GITHUB_ACTION_PATH/configure.sh"
+      env:
+        CI_TOKEN: ${{ inputs.ci-token }}
+        EXTRA_PATTERNS: ${{ inputs.extra-patterns }}

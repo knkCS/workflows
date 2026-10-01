@@ -31,6 +31,12 @@ name: Self-test
 # - `staging-tag` (tests/staging-tag/run.sh) proves staging-image's deploy-repo
 #   update against a throwaway local deploy repo: only `image.tag` rewritten, a
 #   no-op when already at the SHA, a lost push race retried on the new tip.
+# - `private-modules` (tests/private-modules/run.sh) proves the
+#   configure-private-modules action lets Go fetch a private module of either
+#   org — knkCS and knkcms — and that a knkcms dependency would NOT resolve
+#   under the old knkCS-only GOPRIVATE. Hermetic: the modules are local git
+#   repos and GOPROXY is off. The job then runs the action itself, from this
+#   commit, to prove action.yml hands its inputs to the tested script.
 # - `docs-only-suite`, `go-only-suite`, `services-suite`, `ui-only-suite` and
 #   `image-only-suite` call go-service-ci from THIS commit (local path), each
 #   with a fixed change set from its test-only `test-changed-files` input, and
@@ -60,6 +66,7 @@ on:
       - .github/workflows/**
       - .github/actionlint.yaml
       - templates/**
+      - actions/**
       - scripts/**
       - tests/**
       - package.json
@@ -140,6 +147,32 @@ jobs:
       - uses: actions/checkout@v6
       - name: Run staging tag update self-test
         run: bash tests/staging-tag/run.sh
+
+  private-modules:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+          cache: false
+      - name: Run private-module configuration self-test
+        run: bash tests/private-modules/run.sh
+      # The action as a caller's job runs it (go-service-ci pins it @v1; this
+      # is the commit under test). The token is a dummy: nothing is fetched.
+      - uses: ./actions/configure-private-modules
+        with:
+          ci-token: dummy-token
+          extra-patterns: github.com/acme/*
+      - name: The action configured GOPRIVATE and the token rewrite
+        run: |
+          set -euo pipefail
+          want='github.com/knkcs/*,github.com/knkcms/*,github.com/acme/*'
+          [ "$GOPRIVATE" = "$want" ] || { echo "::error::GOPRIVATE is '$GOPRIVATE', want '$want'"; exit 1; }
+          [ "$(go env GONOSUMDB)" = "$want" ] || { echo "::error::GONOSUMDB does not follow GOPRIVATE"; exit 1; }
+          got=$(git config --global --get url.https://dummy-token@github.com/.insteadof)
+          [ "$got" = "https://github.com/" ] || { echo "::error::insteadOf is '$got'"; exit 1; }
 
   # The PR suite end to end: go-service-ci called from THIS commit (local
   # path) with five fixed change sets (its test-only `test-changed-files`
