@@ -28,6 +28,11 @@ on:
       package-dir:   { type: string, required: true }   # e.g. packages/statushub-ui
       tag-name:      { type: string, required: true }   # e.g. statushub-ui-v1.2.3
       tag-prefix:    { type: string, required: true }   # e.g. statushub-ui-v
+      # Git ref to build and publish from; empty means the triggering commit,
+      # as before. A release passes its tag (the same value as `tag-name`), so
+      # the package is built from the commit that was released, not whichever
+      # later commit the run happens to be for.
+      ref:           { type: string, default: "" }      # e.g. statushub-ui-v1.2.3
       build-script:  { type: string, default: "build:ui" }
       test-script:   { type: string, default: "test:ui" }
       node-ci-flags: { type: string, default: "" }
@@ -61,6 +66,8 @@ jobs:
           echo "::error::NPM_TOKEN is required when registry-url is not GitHub Packages"
           exit 1
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref }}
       - uses: actions/setup-node@v4
         with:
           node-version: "22"

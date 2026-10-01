@@ -5,7 +5,7 @@ on:
       chart-path: { type: string, required: true }    # e.g. charts/statushub
       chart-name: { type: string, required: true }    # e.g. statushub
       version:    { type: string, required: true }    # e.g. 1.2.3 (no leading v)
-      ref:        { type: string, required: false, default: '' }  # git ref to build from (defaults to the triggering commit)
+      ref:        { type: string, required: false, default: '' }  # git ref to build from, e.g. v1.2.3 (defaults to the triggering commit)
       build-timeout-minutes: { type: number, default: 30 }  # per native build leg; `merge` is fixed at 10
       # Package the chart at the version (and appVersion) its Chart.yaml
       # declares instead of `version`. For a staging image, whose `version` is
@@ -53,6 +53,9 @@ jobs:
             echo "image=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
             echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
             echo "arch=$(echo '${{ matrix.platform }}' | cut -d/ -f2)"
+            # The commit actually checked out: `ref`'s (a release tag's) when
+            # set, which need not be github.sha.
+            echo "commit=$(git rev-parse HEAD)"
           } >> "$GITHUB_OUTPUT"
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v4
@@ -72,7 +75,7 @@ jobs:
             ci_token=${{ secrets.CI_TOKEN }}
           build-args: |
             VERSION=${{ inputs.version }}
-            COMMIT=${{ github.sha }}
+            COMMIT=${{ steps.vars.outputs.commit }}
             DATE=${{ steps.vars.outputs.date }}
           cache-from: type=gha,scope=${{ steps.vars.outputs.arch }}
           cache-to: type=gha,mode=max,scope=${{ steps.vars.outputs.arch }}
