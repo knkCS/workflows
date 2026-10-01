@@ -13,15 +13,16 @@ decisions behind the rules are ADRs [0001](adr/0001-arm64-is-a-developer-platfor
 (`@v1` only). Every input of every shared workflow is documented in the
 [README](../README.md).
 
-> **Before `v1` moves.** The templates call the PR suite and merge check that
-> `go-service-ci` has on `main` of this repo: `mode`, change areas, `ci-ok`,
-> `working-directory`, `image-check` and the timeout inputs — and the
-> staging image workflow exists only there. `v1` moves to them only after the
-> pilots are green (statushub, #29; layout, #30). Until then, `v1` does
-> not declare those inputs and a copied template fails at startup (an
-> undeclared input is an error, not ignored — ADR 0003). Check with
-> `git ls-remote https://github.com/knkcs/workflows refs/tags/v1` against the
-> release notes of #29; do not work around it with a SHA or `@main` pin.
+> **Check `v1` first.** The templates need the PR suite and merge check rework
+> of `go-service-ci` — `mode`, change areas, `ci-ok`, `working-directory`,
+> `image-check` and the timeout inputs — and the staging image workflow. `v1`
+> moves to them once statushub's pilot (#29) is green; that pilot proved the
+> PR suite and the release `main` template, and the staging image template is
+> first piloted on layout (#30). If
+> `git ls-remote https://github.com/knkcs/workflows refs/tags/v1` still shows
+> `7d6dc74…`, `v1` has not moved yet and a copied template fails at startup
+> (an undeclared input is an error, not ignored — ADR 0003): wait, and do not
+> work around it with a SHA or `@main` pin.
 
 ## The caller templates
 
@@ -346,7 +347,7 @@ but row 8's `uses:` lines, whose `needs:` you check by eye.
 | 4 | **SHA or `@main` pins** of this repo | `grep -rniE 'knkcs/workflows/[^ ]+@' .github/workflows/ \| grep -vE '@v1(\s\|$)'` | `@v1` ([policy](#pinning-v1-only)) |
 | 5 | **Missing timeouts** — a job that runs steps without `timeout-minutes` (a `uses:` job cannot have one; its called jobs do) | `python3 -c "import glob,yaml;[print(f,j) for f in glob.glob('.github/workflows/*.y*ml') for j,s in (yaml.safe_load(open(f)).get('jobs') or {}).items() if 'uses' not in s and 'timeout-minutes' not in s]"` | `timeout-minutes:` on every such job: 10 for small jobs, the class defaults in the README for the rest |
 | 6 | **No concurrency, or cancelling on `main`** | `grep -L '^concurrency:' .github/workflows/*.y*ml` and `grep -rn 'cancel-in-progress: true' .github/workflows/` | The templates' concurrency block, verbatim |
-| 7 | **The PR suite again on `push: main`** — a `go-service-ci` call in a workflow triggered by `push` without `mode: merge-check` | `grep -ln 'go-service-ci' .github/workflows/* \| xargs grep -ln 'push:' \| xargs grep -L 'mode: merge-check'` | `pull_request` only in `ci.yml`; `main` runs the merge check from the `main` template |
+| 7 | **The PR suite again on `push: main`** — a `go-service-ci` call in a workflow triggered by `push` without `mode: merge-check` | `grep -ln 'go-service-ci' .github/workflows/* \| xargs grep -lE '^[[:space:]]*push:\|^on:.*push' \| xargs grep -L 'mode: merge-check'` | `pull_request` only in `ci.yml`; `main` runs the merge check from the `main` template |
 | 8 | **Release not gated on the merge check** — a `release-please` call without `needs:` on the merge check, or in a workflow of its own | `grep -rn -B2 -A2 'release-please.yml@' .github/workflows/` and look for the `needs:` | The release `main` template |
 | 9 | **Publishing from a tag-triggered workflow** that expects release-please's tags (they are created with `GITHUB_TOKEN` and trigger nothing) | `grep -rn -A3 'tags:' .github/workflows/` | Publish jobs gated on release-please's outputs in `main.yml` |
 | 10 | **`CI_TOKEN` passed to release-please** (directly or by `secrets: inherit`) | `grep -rn -A4 'release-please.yml@' .github/workflows/ \| grep -E '^\S+-[0-9]+-\s*secrets:'` | No secrets on that job ([`CI_TOKEN`](#the-ci_token-secret)) |
@@ -373,7 +374,7 @@ doc-converter; knkcms knkcms-seed and the older repos).
 
 | Repo | Publish model | Uses | Pin | Notes | Ticket |
 |---|---|---|---|---|---|
-| statushub (`82311ba`) | release (image + chart, UI package) | `go-service-ci`, `commitlint`, `release-please`, `publish-image-chart` (also a manual dispatch), `publish-ui` | `@v1` | Nothing hand-rolled. The PR suite runs again in full on `push: main`; release is a separate workflow, not gated on any check; no concurrency anywhere. | #29 (pilot) |
+| statushub (knkCS/statushub#76) | release (image + chart, UI package) | the caller templates: `ci.yml` (PR suite, with `ui-test`, `check-gofmt`, `image-check`), `commitlint.yml`, `main.yml` (merge check → `release-please` → `publish-image-chart` / `publish-ui`); `publish-image-chart` also by manual dispatch | `@v1` | Migrated by the pilot (#29), which observed every case end to end against `@main` of this repo. Nothing hand-rolled; secrets passed by name; the anti-pattern checklist finds nothing. | #29 (pilot) |
 | taskhub (`cb62ee2`) | release (UI package) + an image and chart pushed on every push to `main` | `go-service-ci`, `release-please`, `publish-ui`; actions `configure-private-modules`, `setup-go-node` | `go-service-ci` at SHA `9624529`, the rest `@v1` | SHA pin from the false "undeclared inputs are ignored" belief. Hand-rolled `docker` job pushes `:latest` + SHA image and chart on each push to `main`, nobody consumes it, `GH_TOKEN` as build-arg, no timeout. `scope-check` is repo-specific (entscope) and stays. Full suite on `push: main`; no CI concurrency. | #32 |
 | mediahub (`6e32f85`) | release (UI package) + an image and chart pushed on every push to `main` | `go-service-ci`, `release-please`, `publish-ui` | `@v1` | Hand-rolled `publish.yml`: amd64 + arm64 under QEMU, `GH_TOKEN` as build-arg, no timeout — the five 6-hour hangs of September 2026. Full suite on `push: main`; no CI concurrency. | #32 |
 | flowhub (`73ca502`) | UI package by hand-pushed `flowhub-ui-v*` tag; no release-please, no image publish | `go-service-ci`, `publish-ui` | `@v1` | `proto` job (buf lint + gen drift — the shared workflow knows no buf) stays. `image` job builds the image on every PR (BuildKit secret, correctly), no timeout → `image-check`. Full suite on `push: main`; no concurrency. | #33 |
