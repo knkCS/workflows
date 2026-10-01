@@ -19,9 +19,14 @@
 #   outputs here is the only way the publish runs at all.
 # - The concurrency block is the one every template carries: it cancels only on
 #   `pull_request`, so runs on `main` queue and a publish is never interrupted
-#   halfway. (GitHub keeps one pending run per group; a newer push replaces an
-#   older pending one, which is safe here — the newer run checks the newer tree
-#   and release-please reads the whole history.)
+#   halfway. GitHub keeps only one pending run per group, though: a newer push
+#   replaces an older pending one. If that older run was a release PR's merge,
+#   the newer run's release-please still cuts the release — tagged at the
+#   release PR's merge commit — but github.sha is now the newer, unreleased
+#   commit.
+# - So every publish builds the release tag, never github.sha: each publish job
+#   passes release-please's `tag_name` output as `ref`. The image, chart, UI
+#   package and `:latest` of vX are then always vX's tree.
 # - `@v1`, never a SHA or `@main` (ADR 0003). No `timeout-minutes`: GitHub
 #   rejects it on a job that calls a reusable workflow, and the called jobs
 #   carry their own.
@@ -84,6 +89,8 @@ jobs:
       chart-path: <chart-path>          # e.g. charts/<name>
       chart-name: <chart-name>          # e.g. <name>
       version: ${{ fromJSON(needs.release-please.outputs.outputs_json)['version'] }}
+      # Build the release tag (v<version>), not github.sha (see the header).
+      ref: ${{ fromJSON(needs.release-please.outputs.outputs_json)['tag_name'] }}
     secrets:
       # The Dockerfile's BuildKit secret `ci_token`, for private modules. GHCR
       # is pushed to with the workflow's own GITHUB_TOKEN.
@@ -101,6 +108,8 @@ jobs:
       package-dir: <ui-package-path>    # e.g. packages/<name>-ui
       tag-prefix: <ui-component>-v      # the component in release-please-config.json, e.g. <name>-ui-v
       tag-name: ${{ fromJSON(needs.release-please.outputs.outputs_json)['<ui-package-path>--tag_name'] }}
+      # Build the release tag, not github.sha (see the header).
+      ref: ${{ fromJSON(needs.release-please.outputs.outputs_json)['<ui-package-path>--tag_name'] }}
     secrets:
       # Public npm. For GitHub Packages pass no secret and set
       # `registry-url: https://npm.pkg.github.com` instead (README, publish-ui).

@@ -49,7 +49,9 @@ One group per workflow and PR (or ref). A new push to a PR cancels its
 superseded run; a run on `main` is never cancelled, because `main` publishes —
 it queues behind the one in progress. (GitHub keeps one *pending* run per
 group, so a burst of merges runs the first and the last; the last checks the
-newest tree and release-please reads the whole history, so nothing is lost.)
+newest tree and release-please reads the whole history. A skipped run's
+release is still cut by the last one, which is why every publish builds the
+release tag, not the run's commit — [Release](#release).)
 Keep the block verbatim: it is identical everywhere precisely so that copying
 it into the wrong file cannot cancel a publish.
 
@@ -162,6 +164,18 @@ merge-check ──► release-please ──► publish-image-chart  (if the root
   its path and `--` (`packages/<name>-ui--release_created`,
   `packages/<name>-ui--tag_name`). Read them through `outputs_json`, as the
   template does.
+- **Publishing builds the release tag, never `github.sha`.** Each publish job
+  passes release-please's `tag_name` output as `ref` — the root's (`v<version>`)
+  to `publish-image-chart`, the UI package's
+  (`packages/<name>-ui--tag_name`, `<name>-ui-v<version>`) to `publish-ui` —
+  and both check that ref out. The run's own commit is not safe to build:
+  `main` queues and GitHub keeps only one pending run, so when a commit lands
+  while a release PR's merge run is still pending, that run is replaced.
+  release-please in the newer run still cuts the release, tagged at the
+  release PR's merge commit, but `github.sha` is then the newer, unreleased
+  commit — and vX's image, chart, UI package and `:latest` would be built
+  from it. The tag is always vX's tree. `tests/caller-templates/run.sh` fails
+  a release template whose publish job omits `ref`.
 - **Permissions per job.** The workflow grants `contents: read`; the
   release-please job adds `contents: write` and `pull-requests: write`, the
   publish jobs `packages: write`. A called workflow can never have more than
@@ -374,7 +388,7 @@ doc-converter; knkcms knkcms-seed and the older repos).
 
 | Repo | Publish model | Uses | Pin | Notes | Ticket |
 |---|---|---|---|---|---|
-| statushub (knkCS/statushub#76) | release (image + chart, UI package) | the caller templates: `ci.yml` (PR suite, with `ui-test`, `check-gofmt`, `image-check`), `commitlint.yml`, `main.yml` (merge check → `release-please` → `publish-image-chart` / `publish-ui`); `publish-image-chart` also by manual dispatch | `@v1` | Migrated by the pilot (#29), which observed every case end to end against `@main` of this repo. Nothing hand-rolled; secrets passed by name; the anti-pattern checklist finds nothing. | #29 (pilot) |
+| statushub (knkCS/statushub#76) | release (image + chart, UI package) | the caller templates: `ci.yml` (PR suite, with `ui-test`, `check-gofmt`, `image-check`), `commitlint.yml`, `main.yml` (merge check → `release-please` → `publish-image-chart` / `publish-ui`); `publish-image-chart` also by manual dispatch | `@v1` | Migrated by the pilot (#29), which observed every case end to end against `@main` of this repo. Both publish jobs build the release tag (`ref:`, #56 — needs `v1` at or past #56's merge, for `publish-ui`'s `ref` input). Nothing hand-rolled; secrets passed by name; the anti-pattern checklist finds nothing. | #29 (pilot), #56 |
 | taskhub (`cb62ee2`) | release (UI package) + an image and chart pushed on every push to `main` | `go-service-ci`, `release-please`, `publish-ui`; actions `configure-private-modules`, `setup-go-node` | `go-service-ci` at SHA `9624529`, the rest `@v1` | SHA pin from the false "undeclared inputs are ignored" belief. Hand-rolled `docker` job pushes `:latest` + SHA image and chart on each push to `main`, nobody consumes it, `GH_TOKEN` as build-arg, no timeout. `scope-check` is repo-specific (entscope) and stays. Full suite on `push: main`; no CI concurrency. | #32 |
 | mediahub (`6e32f85`) | release (UI package) + an image and chart pushed on every push to `main` | `go-service-ci`, `release-please`, `publish-ui` | `@v1` | Hand-rolled `publish.yml`: amd64 + arm64 under QEMU, `GH_TOKEN` as build-arg, no timeout — the five 6-hour hangs of September 2026. Full suite on `push: main`; no CI concurrency. | #32 |
 | flowhub (`73ca502`) | UI package by hand-pushed `flowhub-ui-v*` tag; no release-please, no image publish | `go-service-ci`, `publish-ui` | `@v1` | `proto` job (buf lint + gen drift — the shared workflow knows no buf) stays. `image` job builds the image on every PR (BuildKit secret, correctly), no timeout → `image-check`. Full suite on `push: main`; no concurrency. | #33 |
