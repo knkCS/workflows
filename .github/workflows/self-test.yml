@@ -50,6 +50,10 @@ name: Self-test
 #   the UI fixture is a workspace of the root package.json, and the image
 #   fixture is a Dockerfile that fails unless built for amd64 with the
 #   `ci_token` BuildKit secret.
+# - `go-extra-checks-error-suite` runs a failing `go-extra-checks` script with
+#   `test-soft-fail`; `suites-check` reads the hook's step outcome back from
+#   it, from `go-only-suite` (where it passes) and from `merge-check-suite`
+#   (where it must be skipped).
 # - `merge-check-suite`, `merge-check-go-error-suite` and
 #   `merge-check-ui-error-suite` call it in `merge-check` mode: green on clean
 #   fixtures with no test run, no service container and no image build,
@@ -231,8 +235,35 @@ jobs:
       ui-package: tests/go-service-ci/ui-package
       image-check: true
       image-context: tests/go-service-ci/image
+      # The hook, green: it runs in `working-directory` with Go and the
+      # module already set up.
+      go-extra-checks: |
+        test -f fixture.go
+        go list ./... >/dev/null
     secrets:
       CI_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # read access to this public repo is all the Go job needs
+
+  # The `go-extra-checks` hook failing in the PR suite. The failure is neither
+  # the script's last command nor a pipeline's last stage, so the step fails
+  # only because it runs under `bash -eo pipefail`. With `test-soft-fail` the
+  # job stays green; suites-check reads the step's outcome, which is taken
+  # before continue-on-error and must be `failure` — without the soft fail,
+  # that failure is `ci / go`'s and so the suite verdict's.
+  go-extra-checks-error-suite:
+    uses: ./.github/workflows/go-service-ci.yml
+    with:
+      test-changed-files: |
+        internal/service/service.go
+      test-soft-fail: true
+      go-version-file: tests/go-service-ci/go-module/go.mod
+      working-directory: tests/go-service-ci/go-module
+      check-ent-drift: false
+      go-extra-checks: |
+        echo "a repo check that fails"
+        false | cat
+        echo "::error::go-extra-checks ran on past a failing command"
+    secrets:
+      CI_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # Go-only again, in `services` mode: the fixture's one test fails unless
   # Postgres and Redis are listening, so a green `go` job proves the service
@@ -314,6 +345,7 @@ jobs:
       embed-frontend: true
       image-check: true  # every area is on, so only the mode keeps `image` from running
       image-context: tests/go-service-ci/image
+      go-extra-checks: exit 1  # PR suite only: run here, it would fail the job
     secrets:
       CI_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -399,7 +431,7 @@ jobs:
       NPM_TOKEN: publish-ui-selftest-npm-token
 
   suites-check:
-    needs: [docs-only-suite, go-only-suite, services-suite, ui-only-suite, image-only-suite, merge-check-suite, merge-check-go-error-suite, merge-check-ui-error-suite]
+    needs: [docs-only-suite, go-only-suite, go-extra-checks-error-suite, services-suite, ui-only-suite, image-only-suite, merge-check-suite, merge-check-go-error-suite, merge-check-ui-error-suite]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -434,6 +466,11 @@ jobs:
             'go-only-suite / ui=skipped' \
             'go-only-suite / image=skipped' \
             'go-only-suite / ci-ok=success' \
+            'go-extra-checks-error-suite / changes=success' \
+            'go-extra-checks-error-suite / go=success' \
+            'go-extra-checks-error-suite / ui=skipped' \
+            'go-extra-checks-error-suite / image=skipped' \
+            'go-extra-checks-error-suite / ci-ok=success' \
             'services-suite / changes=success' \
             'services-suite / go=success' \
             'services-suite / ui=skipped' \
@@ -493,6 +530,30 @@ jobs:
             'merge-check-ui-error-suite vet=success typecheck=failure test=skipped' | sort)
           if [ "$got" != "$want" ]; then
             echo "::error::the merge check did not vet, typecheck and skip the tests as expected; want:"
+            printf '%s\n\n' "$want"
+            diff <(printf '%s\n' "$want") <(printf '%s\n' "$got") || true
+            exit 1
+          fi
+      # The `go-extra-checks` hook, from go-service-ci's `go-extra-checks-outcome`
+      # output: it passes in the Go-only suite, fails (soft) on a failing
+      # script, and is skipped in the merge check — whose script is `exit 1`,
+      # so had it run, its job would be red as well. Unset, it is skipped.
+      - name: The go-extra-checks hook runs in the PR suite and fails on a failing script
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          got=$(jq -r 'to_entries[]
+            | select(.key == "go-only-suite" or .key == "go-extra-checks-error-suite" or .key == "merge-check-suite" or .key == "services-suite")
+            | "\(.key) go-extra-checks=\(.value.outputs["go-extra-checks-outcome"])"' <<<"$NEEDS" | sort)
+          printf '%s\n\n' "$got"
+          want=$(printf '%s\n' \
+            'go-only-suite go-extra-checks=success' \
+            'go-extra-checks-error-suite go-extra-checks=failure' \
+            'merge-check-suite go-extra-checks=skipped' \
+            'services-suite go-extra-checks=skipped' | sort)
+          if [ "$got" != "$want" ]; then
+            echo "::error::the go-extra-checks hook did not run, fail and skip as expected; want:"
             printf '%s\n\n' "$want"
             diff <(printf '%s\n' "$want") <(printf '%s\n' "$got") || true
             exit 1
