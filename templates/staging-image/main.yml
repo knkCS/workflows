@@ -6,6 +6,11 @@
 # pushed — and writes the SHA into the service's staging values in the deploy
 # repo. Copy to `.github/workflows/main.yml` and replace every <service>.
 #
+# The merge check is one job, `merge-check / go` — no change areas, no
+# `ci-ok` — and its result is the call's: a failed step fails it, and
+# `needs: merge-check` skips staging-image. Never add `always()` or
+# `!cancelled()` to staging-image's `if:`.
+#
 # Before adopting: the Dockerfile must read CI_TOKEN as the BuildKit secret
 # `ci_token` (`RUN --mount=type=secret,id=ci_token ...`), not a build-arg, and
 # build arm64 natively (see README, "staging-image.yml").

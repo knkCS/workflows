@@ -13,7 +13,11 @@
 # - The merge check (go-service-ci in `merge-check` mode) is the release gate:
 #   release-please `needs:` it, so a `main` that does not compile never opens
 #   a release PR, cuts a tag, or publishes an image, chart or package. On
-#   knkCS nothing else stops a broken merge (ADR 0002).
+#   knkCS nothing else stops a broken merge (ADR 0002). It is one job,
+#   `merge-check / go` — no change areas, no `ci-ok` — and its result is the
+#   call's: a failed step fails it, and `needs: merge-check` skips
+#   release-please. Never give release-please an `if:` with `always()` or
+#   `!cancelled()`: it would then run after a failed merge check.
 # - release-please and the publish jobs live in this same workflow because a
 #   release created with GITHUB_TOKEN starts no other workflow; gating on its
 #   outputs here is the only way the publish runs at all.
