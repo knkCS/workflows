@@ -51,7 +51,8 @@ name: Self-test
 #   fixture is a Dockerfile that fails unless built for amd64 with the
 #   `ci_token` BuildKit secret.
 # - `merge-check-suite`, `merge-check-go-error-suite` and
-#   `merge-check-ui-error-suite` call it in `merge-check` mode: green on clean
+#   `merge-check-ui-error-suite` call it in `merge-check` mode: one job, `go`
+#   (`changes` and `ci-ok` skipped like the rest), green on clean
 #   fixtures with no test run, no service container and no image build,
 #   and — read back step by step by `suites-check` — failing Vet on a Go
 #   compile error and the UI typecheck on a type error. The two failing ones set the
@@ -297,8 +298,8 @@ jobs:
   # proves no test ran; the step list in suites-check proves no service
   # container started. The change
   # set is docs-only — it would skip every job in a PR suite — to prove the
-  # merge check ignores change areas; `image-check` is on, to prove the merge
-  # check never builds the image.
+  # merge check ignores change areas (it runs no `changes` job at all);
+  # `image-check` is on, to prove the merge check never builds the image.
   merge-check-suite:
     uses: ./.github/workflows/go-service-ci.yml
     with:
@@ -421,8 +422,10 @@ jobs:
           jobs=$(gh api --paginate "repos/$REPO/check-suites/$suite/check-runs?per_page=100" \
             --jq '.check_runs[] | select(.name | test("-suite / ")) | "\(.name)=\(.conclusion)"' | sort)
           printf '%s\n\n' "$jobs"
-          # One line per job, "<suite> / <job>=<conclusion>". Every suite must
-          # run `changes` and `ci-ok`, both green; the rest is per change set.
+          # One line per job, "<suite> / <job>=<conclusion>". Every PR suite
+          # must run `changes` and `ci-ok`, both green; the rest is per change
+          # set. A merge check runs `go` alone: everything else is skipped,
+          # which GitHub never bills.
           want=$(printf '%s\n' \
             'docs-only-suite / changes=success' \
             'docs-only-suite / go=skipped' \
@@ -449,21 +452,21 @@ jobs:
             'image-only-suite / ui=skipped' \
             'image-only-suite / image=success' \
             'image-only-suite / ci-ok=success' \
-            'merge-check-suite / changes=success' \
+            'merge-check-suite / changes=skipped' \
             'merge-check-suite / go=success' \
             'merge-check-suite / ui=skipped' \
             'merge-check-suite / image=skipped' \
-            'merge-check-suite / ci-ok=success' \
-            'merge-check-go-error-suite / changes=success' \
+            'merge-check-suite / ci-ok=skipped' \
+            'merge-check-go-error-suite / changes=skipped' \
             'merge-check-go-error-suite / go=success' \
             'merge-check-go-error-suite / ui=skipped' \
             'merge-check-go-error-suite / image=skipped' \
-            'merge-check-go-error-suite / ci-ok=success' \
-            'merge-check-ui-error-suite / changes=success' \
+            'merge-check-go-error-suite / ci-ok=skipped' \
+            'merge-check-ui-error-suite / changes=skipped' \
             'merge-check-ui-error-suite / go=success' \
             'merge-check-ui-error-suite / ui=skipped' \
             'merge-check-ui-error-suite / image=skipped' \
-            'merge-check-ui-error-suite / ci-ok=success' | sort)
+            'merge-check-ui-error-suite / ci-ok=skipped' | sort)
           if [ "$jobs" != "$want" ]; then
             echo "::error::a change set ran the wrong jobs; want:"
             printf '%s\n\n' "$want"
