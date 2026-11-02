@@ -1,5 +1,8 @@
-# Caller template: conventional-commit linting. The same file for every
-# caller — copy it to .github/workflows/commitlint.yml as is.
+# Caller template: conventional-commit linting, for a repo WITHOUT a PR suite
+# (a deploy repo, a docs or skills repo). The PR suite (pr.yml) lints commit
+# messages in its own `changes` job, so a repo with one does not copy this —
+# a second lint would bill a runner minute per PR run for nothing. Copy it to
+# .github/workflows/commitlint.yml as is.
 # release-please reads these commit messages to decide each version, so a
 # mislabelled commit ships a wrong version; this check catches it on the PR.
 #

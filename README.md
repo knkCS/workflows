@@ -22,8 +22,8 @@ this repo; linted and checked by its self-test.
 
 | Template | Copy to | What it wires |
 |---|---|---|
-| `pr.yml` | `.github/workflows/ci.yml` | The PR suite (both publish models) |
-| `commitlint.yml` | `.github/workflows/commitlint.yml` | Conventional-commit linting |
+| `pr.yml` | `.github/workflows/ci.yml` | The PR suite (both publish models), its conventional-commit lint included |
+| `commitlint.yml` | `.github/workflows/commitlint.yml` | Conventional-commit linting, for a repo **without** a PR suite |
 | `release/main.yml` | `.github/workflows/main.yml` | Release model: merge check → release-please → `publish-image-chart` / `publish-ui` |
 | `staging-image/main.yml` | `.github/workflows/main.yml` | Staging image model: merge check → `staging-image.yml` on every push to `main` |
 
@@ -31,8 +31,8 @@ this repo; linted and checked by its self-test.
 
 | Workflow | Purpose |
 |---|---|
-| `go-service-ci.yml` | Go service CI (vet, test, lint) |
-| `commitlint.yml` | Conventional-commit linting |
+| `go-service-ci.yml` | Go service CI (vet, test, lint, conventional-commit lint) |
+| `commitlint.yml` | Conventional-commit linting, for a repo without a `go-service-ci` PR suite |
 | `release-please.yml` | release-please PR + release automation |
 | `publish-image-chart.yml` | Build+push image and Helm chart to GHCR |
 | `staging-image.yml` | Publish a **staging image** (commit SHA + `latest`) and chart, and point the deploy repo's staging values at it |
@@ -44,11 +44,12 @@ touches a workflow, a caller template, a script or a test it runs actionlint
 over every workflow and every caller template under `templates/` (configured by
 `.github/actionlint.yaml`), `tests/caller-templates/run.sh` (every template
 pins `@v1`, passes only inputs and secrets the called workflow declares,
-cancels on PRs only, and gates `main` on the merge check),
+grants every permission the called workflow asks for, cancels on PRs only,
+and gates `main` on the merge check),
 `tests/workflow-timeouts/run.sh` (every job declares the agreed timeout), and
 each engine script's fixture
 self-test (`tests/rendering-check/run.sh`, `tests/change-areas/run.sh`,
-`tests/staging-tag/run.sh`). It
+`tests/commit-lint/run.sh`, `tests/staging-tag/run.sh`). It
 also calls `go-service-ci.yml` from the PR's own commit with five fixed change
 sets — docs-only, Go-only (in both test modes), UI-only and image-only — against the
 fixtures in `tests/go-service-ci/`, and checks that each ran exactly the jobs
@@ -56,7 +57,9 @@ its change areas need. Three more calls run the merge check: green on clean
 fixtures with no test run, no service container and no image build, and failing on a
 Go compile error and on a UI type error (read back from the workflow's
 `*-outcome` outputs, with the test-only `test-soft-fail` keeping the run
-green). Two calls of `publish-ui.yml`, with the test-only `dry-run`, prove
+green). Every PR-suite call lints the PR's own commit messages, which must
+pass, and one more lints a fixed bad commit (test-only `test-commits`), which
+must fail. Two calls of `publish-ui.yml`, with the test-only `dry-run`, prove
 `npm-github-packages` hands `CI_TOKEN` to `npm ci` and never to `npm publish`,
 and that a caller without it is unchanged. The root
 `package.json` exists only for the UI fixtures and the `publish-ui` probes.
@@ -117,6 +120,18 @@ files into **change areas** — docs, Go, UI, image — and ends with `ci-ok`, t
 - **The file list comes from the API**, not a checkout, so no deep fetch. A
   renamed file counts under both its old and its new path. A non-PR event
   (push, `workflow_dispatch`) means every area.
+- **`changes` lints the commit messages too.** In `pr-suite` mode its last
+  step checks every commit of the PR against
+  `@commitlint/config-conventional` (commitlint 19, the rule set
+  `commitlint.yml` applies; merge commits are ignored, warnings do not fail),
+  so a non-conventional message fails `changes` and turns `ci-ok` red — and
+  skips the `go`, `ui` and `image` jobs, since the commits must be reworded
+  and force-pushed anyway. The commits come from the same compare API as the
+  files, so the suite still needs only `contents: read`; a PR of more than 250
+  commits fails, as the API cannot list them all. A caller with a PR suite
+  therefore has **no `commitlint.yml`** — it would bill a second runner minute
+  per PR run for the same lint. The merge check lints nothing (its commits
+  were linted on their PR). The lint is `scripts/commit-lint.sh`.
 - **Your layout counts.** Everything under `working-directory` and
   `helm-chart` is Go, and everything under `ui-package` is UI — Markdown,
   Dockerfiles and `*.go` files excepted, which keep their own area. So a Go
@@ -198,9 +213,10 @@ jobs:
 
 Outputs: `vet-outcome`, `typecheck-outcome` (the merge check's UI typecheck),
 `test-outcome` and `go-extra-checks-outcome` report what the `go` job's Vet,
-Typecheck, Test and Go extra checks steps did — `success`, `failure` or
-`skipped`, empty when the job did not run. A caller rarely needs them; this
-repo's self-test reads them.
+Typecheck, Test and Go extra checks steps did, and `commitlint-outcome` what
+the `changes` job's commit lint did — `success`, `failure` or `skipped`, empty
+when the job did not run. A caller rarely needs them; this repo's self-test
+reads them.
 
 ### `go-service-ci.yml` inputs
 
@@ -231,7 +247,8 @@ repo's self-test reads them.
 | `docs-exclude` | string | `""` | Extra paths that are never docs (see [change areas](#go-service-ciyml-change-areas-and-the-suite-verdict)) |
 | `go-extra-checks` | string | `""` | Your own Go checks: a multi-line bash script the `go` job runs as its **Go extra checks** step, in `working-directory`, after vet and before the tests. PR suite only. Empty means no step (see [below](#your-own-checks-go-extra-checks-and-repo-checks)) |
 | `test-changed-files` | string | `""` | **Test-only**, for this repo's self-test: replaces the PR's changed-file list. Callers never set it |
-| `test-soft-fail` | boolean | `false` | **Test-only**, for this repo's self-test: a failing Vet, UI typecheck or Go extra checks step does not fail the `go` job, so a failure can be asserted while the run stays green. Callers never set it |
+| `test-commits` | string | `""` | **Test-only**, for this repo's self-test: replaces the PR's commits (a JSON array of messages or `{sha, message}`) for the commit lint. Callers never set it |
+| `test-soft-fail` | boolean | `false` | **Test-only**, for this repo's self-test: a failing Vet, UI typecheck, Go extra checks or commit lint step does not fail its job, so a failure can be asserted while the run stays green. Callers never set it |
 
 `check-gofmt`, `ui-lint`, `ui-test`, `npm-github-packages` and `image-check`
 are opt-in and default to off, so enabling them is always a deliberate change

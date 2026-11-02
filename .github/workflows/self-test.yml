@@ -28,6 +28,9 @@ name: Self-test
 #   conservative one, a file in no known area turns on every area — and the
 #   suite verdict behind its `ci-ok` job (green on pass/skipped, red on
 #   failure/cancelled).
+# - `commit-lint` (tests/commit-lint/run.sh) proves the conventional-commit
+#   lint behind go-service-ci's `changes` job accepts conforming commits
+#   (breaking, scoped, merge) and refuses a non-conventional one, naming it.
 # - `staging-tag` (tests/staging-tag/run.sh) proves staging-image's deploy-repo
 #   update against a throwaway local deploy repo: only `image.tag` rewritten, a
 #   no-op when already at the SHA, a lost push race retried on the new tip.
@@ -61,6 +64,11 @@ name: Self-test
 #   compile error and the UI typecheck on a type error. The two failing ones set the
 #   test-only `test-soft-fail`, so the failure is recorded on the step while
 #   this run stays green.
+# - `commitlint-error-suite` calls it in `pr-suite` mode on a fixed bad
+#   commit (test-only `test-commits`, soft-failed the same way), and
+#   `suites-check` reads the lint step's outcome back: `failure` there,
+#   `success` in every other PR-suite call (which lint THIS PR's own commits),
+#   `skipped` in the merge check.
 # - `publish-ui-github-packages` and `publish-ui-default` call publish-ui from
 #   THIS commit with its test-only `dry-run` and dummy secrets, and probe
 #   (tests/publish-ui/check-npmrc.mjs) the npm config `npm ci` and `npm
@@ -149,6 +157,14 @@ jobs:
       - uses: actions/checkout@v6
       - name: Run change-area classifier and suite verdict self-test
         run: bash tests/change-areas/run.sh
+
+  commit-lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - name: Run commit lint self-test
+        run: bash tests/commit-lint/run.sh
 
   staging-tag:
     runs-on: ubuntu-latest
@@ -380,6 +396,19 @@ jobs:
     secrets:
       CI_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  # The PR suite's commit lint on a commit that is not conventional. The
+  # change set is docs-only, so nothing but `changes` and `ci-ok` runs; with
+  # `test-soft-fail` the lint step fails without failing `changes` (which would
+  # turn this run red), and suites-check reads its outcome.
+  commitlint-error-suite:
+    uses: ./.github/workflows/go-service-ci.yml
+    with:
+      test-changed-files: README.md
+      test-commits: '[{"sha": "0000000", "message": "feat: a conforming commit"}, {"sha": "1111111", "message": "added some stuff"}]'
+      test-soft-fail: true
+    secrets:
+      CI_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # never used: no job that reads it may run
+
   # publish-ui called from THIS commit, twice, with `dry-run` so nothing is
   # published and dummy secrets so nothing real could be. The fixture package
   # (tests/publish-ui/package) is no workspace, so the root lockfile — and
@@ -431,7 +460,7 @@ jobs:
       NPM_TOKEN: publish-ui-selftest-npm-token
 
   suites-check:
-    needs: [docs-only-suite, go-only-suite, go-extra-checks-error-suite, services-suite, ui-only-suite, image-only-suite, merge-check-suite, merge-check-go-error-suite, merge-check-ui-error-suite]
+    needs: [docs-only-suite, go-only-suite, go-extra-checks-error-suite, services-suite, ui-only-suite, image-only-suite, merge-check-suite, merge-check-go-error-suite, merge-check-ui-error-suite, commitlint-error-suite]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -500,7 +529,12 @@ jobs:
             'merge-check-ui-error-suite / go=success' \
             'merge-check-ui-error-suite / ui=skipped' \
             'merge-check-ui-error-suite / image=skipped' \
-            'merge-check-ui-error-suite / ci-ok=success' | sort)
+            'merge-check-ui-error-suite / ci-ok=success' \
+            'commitlint-error-suite / changes=success' \
+            'commitlint-error-suite / go=skipped' \
+            'commitlint-error-suite / ui=skipped' \
+            'commitlint-error-suite / image=skipped' \
+            'commitlint-error-suite / ci-ok=success' | sort)
           if [ "$jobs" != "$want" ]; then
             echo "::error::a change set ran the wrong jobs; want:"
             printf '%s\n\n' "$want"
@@ -554,6 +588,34 @@ jobs:
             'services-suite go-extra-checks=skipped' | sort)
           if [ "$got" != "$want" ]; then
             echo "::error::the go-extra-checks hook did not run, fail and skip as expected; want:"
+            printf '%s\n\n' "$want"
+            diff <(printf '%s\n' "$want") <(printf '%s\n' "$got") || true
+            exit 1
+          fi
+      # The commit lint in `changes`, from go-service-ci's commitlint-outcome
+      # output (taken before continue-on-error, as above). Every PR-suite call
+      # lints this PR's own commits, which must conform; the error suite's
+      # fixed bad commit must fail; the merge check lints nothing.
+      - name: The PR suite lints commit messages, the merge check does not
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          got=$(jq -r 'to_entries[] | "\(.key) commitlint=\(.value.outputs["commitlint-outcome"])"' <<<"$NEEDS" | sort)
+          printf '%s\n\n' "$got"
+          want=$(printf '%s\n' \
+            'docs-only-suite commitlint=success' \
+            'go-only-suite commitlint=success' \
+            'go-extra-checks-error-suite commitlint=success' \
+            'services-suite commitlint=success' \
+            'ui-only-suite commitlint=success' \
+            'image-only-suite commitlint=success' \
+            'merge-check-suite commitlint=skipped' \
+            'merge-check-go-error-suite commitlint=skipped' \
+            'merge-check-ui-error-suite commitlint=skipped' \
+            'commitlint-error-suite commitlint=failure' | sort)
+          if [ "$got" != "$want" ]; then
+            echo "::error::the commit lint did not run as expected; want:"
             printf '%s\n\n' "$want"
             diff <(printf '%s\n' "$want") <(printf '%s\n' "$got") || true
             exit 1

@@ -60,17 +60,22 @@ on:
       # this repo's self-test can drive the `changes` job with a fixed change
       # set. Inert when empty, which is the default; callers never set it.
       test-changed-files:  { type: string, default: "" }
-      # TEST-ONLY. The Vet, UI typecheck and Go extra checks steps record their
-      # failure without failing the job (step-level continue-on-error), so this
-      # repo's self-test can prove the merge check catches a Go compile error
-      # and a UI type error, and the PR suite a failing `go-extra-checks`
-      # script, while its own run stays green: a failed job is a red check
-      # on the PR whatever the caller does with it. Callers never set it.
+      # TEST-ONLY. Replaces the PR's commits (a JSON array of messages or of
+      # {sha, message}) so this repo's self-test can prove the commit lint
+      # fails on a bad message. Inert when empty; callers never set it.
+      test-commits:        { type: string, default: "" }
+      # TEST-ONLY. The Vet, UI typecheck, Go extra checks and commit lint steps
+      # record their failure without failing the job (step-level
+      # continue-on-error), so this repo's self-test can prove the merge check
+      # catches a Go compile error and a UI type error, and the PR suite a
+      # failing `go-extra-checks` script and a bad commit message, while its
+      # own run stays green: a failed job is a red check on the PR whatever
+      # the caller does with it. Callers never set it.
       test-soft-fail:      { type: boolean, default: false }
     secrets:
       CI_TOKEN: { required: true }
-    # What the `go` job's key steps did: `success`, `failure` or `skipped`,
-    # empty when the job did not run. An outcome is taken BEFORE
+    # What the key steps did: `success`, `failure` or `skipped`, empty when
+    # their job did not run. An outcome is taken BEFORE
     # continue-on-error, so under `test-soft-fail` a failed step still reads
     # `failure` here while its job stays green; that is how this repo's
     # self-test asserts the merge check caught an error (the jobs API reports
@@ -80,6 +85,7 @@ on:
       typecheck-outcome: { value: "${{ jobs.go.outputs.typecheck }}" }  # merge check only; the `ui` job's is not reported
       test-outcome:      { value: "${{ jobs.go.outputs.test }}" }
       go-extra-checks-outcome: { value: "${{ jobs.go.outputs.go-extra-checks }}" }  # `skipped` when unset, and in the merge check
+      commitlint-outcome: { value: "${{ jobs.changes.outputs.commitlint }}" }  # the `changes` job's commit lint
 
 permissions:
   contents: read
@@ -112,6 +118,16 @@ jobs:
   # In `merge-check` mode every area is on, whatever the event and even with
   # `test-changed-files` set: the merge check is what a caller gates releases
   # on, so no change set may skip it.
+  #
+  # In `pr-suite` mode this job also lints the PR's commit messages as
+  # conventional commits (release-please reads them to pick each version), so
+  # a bad message turns the suite verdict red without a job of its own — one
+  # billed minute fewer per PR run than a separate commitlint workflow. A
+  # caller with a PR suite therefore has no commitlint.yml; the reusable
+  # commitlint.yml stays for repos without one. The lint runs last, after the
+  # classifier, and a failure skips the `go`, `ui` and `image` jobs (they need
+  # this one): the message has to be reworded and force-pushed anyway, which
+  # runs the suite again.
   changes:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -121,6 +137,7 @@ jobs:
       ui: ${{ steps.classify.outputs.ui }}
       image: ${{ steps.classify.outputs.image }}
       docs-only: ${{ steps.classify.outputs.docs-only }}
+      commitlint: ${{ steps.commitlint.outcome }}
     steps:
       # ui-lint and ui-test run in the `ui` job, which exists only when
       # `ui-package` is set — so on their own they would be silently ignored, and
@@ -200,6 +217,47 @@ jobs:
           docs_only=true
           if grep -qxE '(go|ui|image)=true' <<<"$areas"; then docs_only=false; fi
           printf '%s\ndocs-only=%s\n' "$areas" "$docs_only" | tee -a "$GITHUB_OUTPUT"
+      # The PR's commits come from the same compare API (base...head: the
+      # commits on the head that the base lacks, which is what the PR shows),
+      # so this needs only `contents: read`. The PR-commits endpoint that
+      # wagoid/commitlint-github-action uses would need `pull-requests: read`,
+      # and asking for that here would fail at startup every caller that does
+      # not grant it, in both modes — a breaking change ADR 0003 keeps off
+      # `v1`. The compare API lists at most 250 commits; a longer PR fails
+      # rather than lint only part of itself. A non-PR event has no commits of
+      # its own and lints nothing. The lint itself, and the pinned commitlint
+      # it installs, is scripts/commit-lint.sh.
+      - name: Lint commit messages
+        id: commitlint
+        if: ${{ inputs.mode == 'pr-suite' }}
+        continue-on-error: ${{ inputs.test-soft-fail }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          TEST_COMMITS: ${{ inputs.test-commits }}
+          COMMITLINT_DIR: ${{ runner.temp }}/commitlint
+        run: |
+          set -euo pipefail
+          if [ -n "$TEST_COMMITS" ]; then
+            echo "::notice::test-commits is set: linting fixed commits, not the PR's"
+            commits=$TEST_COMMITS
+          elif [ "$EVENT" != pull_request ] && [ "$EVENT" != pull_request_target ]; then
+            echo "no pull request in context ($EVENT): no commits to lint"
+            exit 0
+          else
+            compare=$(gh api "repos/${REPO}/compare/${BASE_SHA}...${HEAD_SHA}" \
+              --jq '{total: .total_commits, commits: [.commits[] | {sha, message: .commit.message}]}')
+            total=$(jq '.total' <<<"$compare")
+            if [ "$total" -gt "$(jq '.commits | length' <<<"$compare")" ]; then
+              echo "::error::the pull request has $total commits, more than the compare API lists; squash some so every one can be linted"
+              exit 1
+            fi
+            commits=$(jq -c '.commits' <<<"$compare")
+          fi
+          bash .knkcs-workflows/scripts/commit-lint.sh <<<"$commits"
 
   # The Go job: every Go check of the PR suite on ONE runner, so Go setup and
   # the module download happen once and no tiny job is billed as a whole
