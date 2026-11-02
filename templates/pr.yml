@@ -61,5 +61,13 @@ jobs:
       # inputs change. The Dockerfile must mount CI_TOKEN as the BuildKit
       # secret `ci_token` (docs/adopting.md, "Dockerfile requirements").
       image-check: true
+      # Your own Go checks (scope check, gen-module build, collisions,
+      # verify-generated), run in the `go` job after vet and before the tests,
+      # in working-directory, under `bash -eo pipefail`. PR suite only. Checks
+      # needing other tooling (buf, the `web` suite) go in ONE `repo-checks`
+      # job beside this one instead (docs/adopting.md).
+      # go-extra-checks: |
+      #   make scope-check
+      #   (cd gen && go build ./...)
     secrets:
       CI_TOKEN: ${{ secrets.CI_TOKEN }}

@@ -51,14 +51,21 @@ on:
       # globs over the whole path; `*` crosses `/`): repo-specific Markdown that
       # is really an input to code. See scripts/change-areas.sh.
       docs-exclude:        { type: string, default: "" }
+      # The caller's own Go checks (entscope, gen-module builds, collisions,
+      # verify-generated…): a multi-line bash script run as the `go` job's
+      # "Go extra checks" step — after Go setup, private-module configuration
+      # and vet (which has downloaded the modules), before the tests — in
+      # `working-directory`. PR suite only; see the step.
+      go-extra-checks:     { type: string, default: "" }
       # TEST-ONLY. Replaces the PR's changed-file list (newline-separated) so
       # this repo's self-test can drive the `changes` job with a fixed change
       # set. Inert when empty, which is the default; callers never set it.
       test-changed-files:  { type: string, default: "" }
-      # TEST-ONLY. The Vet and UI typecheck steps record their failure without
-      # failing the job (step-level continue-on-error), so this repo's
-      # self-test can prove the merge check catches a Go compile error and a UI
-      # type error while its own run stays green: a failed job is a red check
+      # TEST-ONLY. The Vet, UI typecheck and Go extra checks steps record their
+      # failure without failing the job (step-level continue-on-error), so this
+      # repo's self-test can prove the merge check catches a Go compile error
+      # and a UI type error, and the PR suite a failing `go-extra-checks`
+      # script, while its own run stays green: a failed job is a red check
       # on the PR whatever the caller does with it. Callers never set it.
       test-soft-fail:      { type: boolean, default: false }
     secrets:
@@ -73,6 +80,7 @@ on:
       vet-outcome:       { value: "${{ jobs.go.outputs.vet }}" }
       typecheck-outcome: { value: "${{ jobs.go.outputs.typecheck }}" }  # merge check only; the `ui` job's is not reported
       test-outcome:      { value: "${{ jobs.go.outputs.test }}" }
+      go-extra-checks-outcome: { value: "${{ jobs.go.outputs.go-extra-checks }}" }  # `skipped` when unset, and in the merge check
 
 permissions:
   contents: read
@@ -240,6 +248,7 @@ jobs:
       vet: ${{ steps.vet.outcome }}
       typecheck: ${{ steps.typecheck.outcome }}
       test: ${{ steps.test.outcome }}
+      go-extra-checks: ${{ steps.go-extra-checks.outcome }}
     defaults:
       run:
         working-directory: ${{ inputs.working-directory }}
@@ -368,6 +377,30 @@ jobs:
         continue-on-error: ${{ inputs.test-soft-fail }}
         working-directory: ${{ github.workspace }}/${{ inputs.ui-package }}
         run: npx tsc --noEmit
+      # The caller's own Go checks, from the `go-extra-checks` input. A job of
+      # the caller's own would repeat checkout, private-module setup and Go
+      # setup for a few seconds of work and bill at least a whole minute; here
+      # the checks reuse this runner's Go, module cache and GOPRIVATE
+      # credential, and are skipped with this job when the Go change area did
+      # not change.
+      #
+      # `shell: bash` runs it as `bash -eo pipefail`, so the first failing
+      # command fails this step — and with it `ci / go` and the suite verdict,
+      # "Go extra checks" named as the failed step. It runs in
+      # `working-directory`; `cd "$GITHUB_WORKSPACE"` for a repo-root check.
+      # The script is the caller's own workflow text, interpolated as any
+      # `run:` is, so it must never embed PR-controlled data (titles, branch
+      # names).
+      #
+      # PR suite only: the merge check stays the light compile-level check.
+      # After vet, so a compile error is reported by Vet; before the tests, so
+      # a failing check does not wait behind them.
+      - name: Go extra checks
+        id: go-extra-checks
+        if: ${{ inputs.mode != 'merge-check' && inputs.go-extra-checks != '' }}
+        continue-on-error: ${{ inputs.test-soft-fail }}
+        shell: bash
+        run: ${{ inputs.go-extra-checks }}
       # -timeout is explicit because Go's default is 600s PER PACKAGE, and a
       # package that outgrows it fails with a stack dump that reads like a
       # deadlock rather than a slow suite. A green run here is otherwise only
@@ -429,8 +462,8 @@ jobs:
       # thin shell, and both reference repos reflect that — taskhub's `web` has no
       # `test` script at all, while messengerhub tests its shell in a bespoke job
       # of its own. So `ui-test` covers `ui-package` alone; a repo wanting its
-      # shell's suite in CI keeps it beside the shared call, the way messengerhub
-      # already keeps `collisions` there.
+      # shell's suite in CI runs it in its one `repo-checks` job beside the
+      # shared call (docs/adopting.md).
       #
       # These run before the builds, as taskhub's job does: lint and test are the
       # cheap signals and should not queue behind a Vite build. That assumes a

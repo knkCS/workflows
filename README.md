@@ -105,7 +105,8 @@ files into **change areas** — docs, Go, UI, image — and ends with `ci-ok`, t
   are this job: in `services` mode it also starts the Postgres and Redis
   service containers, in `testcontainers` mode it starts none. (It replaces
   the former `backend`, `test-testcontainers`, `test-services` and `helm`
-  jobs.)
+  jobs.) Your own Go checks run in it too, through `go-extra-checks`
+  ([below](#your-own-checks-go-extra-checks-and-repo-checks)).
 - **`ci-ok` is the one check to require** in branch protection (where the plan
   allows it — see ADR 0002). It always runs, is red if any job that ran failed
   or was cancelled, and is green when jobs were skipped by change detection. In
@@ -161,7 +162,7 @@ only safety net).
   `frontend-build`) and `tsc --noEmit`. No Test step runs and no service
   container starts, whatever `test-mode` says; neither the `ui` job nor the
   `image` job runs (even with `image-check` on), and
-  `ui-lint`/`ui-test` are PR-suite gates only. The typecheck is its own step
+  `ui-lint`/`ui-test` and `go-extra-checks` are PR-suite gates only. The typecheck is its own step
   because a Vite build does not typecheck.
 - **Every area, always.** Change areas do not apply: the merge check checks the
   whole tree on every event, so no change set can skip the release gate
@@ -200,10 +201,11 @@ jobs:
   by a green job, and a key that exists is never overwritten — a new `go.sum`
   or lockfile makes a new one.
 
-Outputs: `vet-outcome`, `typecheck-outcome` (the merge check's UI typecheck)
-and `test-outcome` report what the `go` job's Vet, Typecheck and Test steps did
-— `success`, `failure` or `skipped`, empty when the job did not run. A caller
-rarely needs them; this repo's self-test reads them.
+Outputs: `vet-outcome`, `typecheck-outcome` (the merge check's UI typecheck),
+`test-outcome` and `go-extra-checks-outcome` report what the `go` job's Vet,
+Typecheck, Test and Go extra checks steps did — `success`, `failure` or
+`skipped`, empty when the job did not run. A caller rarely needs them; this
+repo's self-test reads them.
 
 ### `go-service-ci.yml` inputs
 
@@ -232,8 +234,9 @@ rarely needs them; this repo's self-test reads them.
 | `ui-timeout-minutes` | number | `15` | Job timeout for the `ui` job |
 | `image-timeout-minutes` | number | `30` | Job timeout for the `image` job |
 | `docs-exclude` | string | `""` | Extra paths that are never docs (see [change areas](#go-service-ciyml-change-areas-and-the-suite-verdict)) |
+| `go-extra-checks` | string | `""` | Your own Go checks: a multi-line bash script the `go` job runs as its **Go extra checks** step, in `working-directory`, after vet and before the tests. PR suite only. Empty means no step (see [below](#your-own-checks-go-extra-checks-and-repo-checks)) |
 | `test-changed-files` | string | `""` | **Test-only**, for this repo's self-test: replaces the PR's changed-file list. Callers never set it |
-| `test-soft-fail` | boolean | `false` | **Test-only**, for this repo's self-test: a failing Vet or UI typecheck step does not fail the `go` job, so a failure can be asserted while the run stays green. Callers never set it |
+| `test-soft-fail` | boolean | `false` | **Test-only**, for this repo's self-test: a failing Vet, UI typecheck or Go extra checks step does not fail the `go` job, so a failure can be asserted while the run stays green. Callers never set it |
 
 `check-gofmt`, `ui-lint`, `ui-test`, `npm-github-packages` and `image-check`
 are opt-in and default to off, so enabling them is always a deliberate change
@@ -246,8 +249,9 @@ to a caller's CI. Five things to know before turning them on:
   included — if it fires on generated output, regenerate rather than hand-format.
 - **The two UI gates cover different workspaces.** `ui-lint` covers `ui-package`
   and, when `frontend-build` is on, `web`; `ui-test` covers `ui-package` alone,
-  because an embedded `web` host is a thin shell — keep its suite in a job of your
-  own beside the shared call if you want one. Each covered workspace **must
+  because an embedded `web` host is a thin shell — run its suite in your
+  `repo-checks` job ([below](#your-own-checks-go-extra-checks-and-repo-checks))
+  if you want one. Each covered workspace **must
   declare the script**: `npm run -w <workspace> <script>` fails on a missing one
   rather than skipping it.
 - **`ui-lint` and `ui-test` require `ui-package`.** The `ui` job runs only when one is set, so
@@ -275,6 +279,36 @@ to a caller's CI. Five things to know before turning them on:
   requires. The GHA build cache shares `publish-image-chart`'s `amd64` scope:
   a PR starts warm from the last publish on `main`, and its own cache entries
   stay under the PR's ref, where no release can read them.
+
+### Your own checks: `go-extra-checks` and `repo-checks`
+
+A check the inputs above cannot express goes in one of two places, never in a
+job of its own per check: every job repeats checkout and setup, and GitHub
+bills each one at least a minute, however few seconds it runs.
+
+- **A Go check goes in `go-extra-checks`** — an entscope / workspace scope
+  check, a build of a second (gen) module, a collisions check,
+  verify-generated. The script runs in the `go` job, so it reuses that job's
+  Go, module cache and private-module credential, and it runs only when the Go
+  change area changed. It runs under `bash -eo pipefail` in
+  `working-directory` (`cd "$GITHUB_WORKSPACE"` for a repo-root check), after
+  vet and helm lint and before the tests. The first failing command fails the
+  **Go extra checks** step, and so `ci / go` and `ci / ci-ok`. It is the
+  caller's own workflow text, interpolated as any `run:` is: never put
+  PR-controlled data such as a title or branch name in it. It does not run in
+  the merge check.
+
+  ```yaml
+      with:
+        go-extra-checks: |
+          make scope-check
+          (cd gen && go build ./...)
+  ```
+
+- **Everything else goes in one `repo-checks` job** in the caller's `ci.yml`,
+  beside the `ci` job — buf lint and generate drift, the `web` frontend suite,
+  anything that needs tooling other than Go. One job for all of them, with
+  its own `timeout-minutes`, each check a named step.
 
 ### `argocd-rendering-check.yml` inputs
 
