@@ -153,8 +153,10 @@ PR suite. It exists to catch two individually green PRs that do not compile
 together, and it is what a release gates on (see ADR 0002: on knkCS it is the
 only safety net).
 
-- **One job, no tests.** The `go` job runs as the merge check — in the
-  checks list under your job's name, e.g. `merge-check / go` — doing ent drift,
+- **One job, no tests.** The `go` job runs as the merge check, and is the
+  only job that runs — no `changes` before it, no `ci-ok` after it (each
+  shows as skipped, which is not billed). In the checks list it appears under
+  your job's name, e.g. `merge-check / go`, doing ent drift,
   gofmt (each when enabled), vet and helm lint (with `helm-chart`), then, with
   a `ui-package`, `npm ci`, the package build (and `web`'s with
   `frontend-build`) and `tsc --noEmit`. No Test step runs and no service
@@ -163,10 +165,13 @@ only safety net).
   `ui-lint`/`ui-test` and `go-extra-checks` are PR-suite gates only. The typecheck is its own step
   because a Vite build does not typecheck.
 - **Every area, always.** Change areas do not apply: the merge check checks the
-  whole tree on every event, so no change set can skip the release gate.
-- **One result.** `ci-ok` is the merge check's verdict too. A caller gates
-  the next job on the call itself — `needs: <the merge check job>` runs only if
-  every job in it passed:
+  whole tree on every event, so no change set can skip the release gate
+  (`docs-exclude` has no effect here).
+- **One result, no suite verdict.** A failed step fails the `go` job, which
+  fails the call. A caller gates the next job on the call itself —
+  `needs: <the merge check job>` runs only if it passed — and must not add a
+  status function (`always()`, `!cancelled()`, `failure()`) to that job's
+  `if:`, which would run it after a failed merge check:
 
 ```yaml
 on:

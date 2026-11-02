@@ -29,7 +29,14 @@
 #   8. a publish-ui call with `npm-github-packages: true` passes CI_TOKEN (the
 #      credential its `npm ci` needs), and one without it passes no CI_TOKEN
 #      (publish-ui has no other use for the token, so passing it would only
-#      hand it to a job that ignores it). `dry-run` is test-only.
+#      hand it to a job that ignores it). `dry-run` is test-only;
+#   9. a `main` template's merge check is gated by GitHub's own result for the
+#      call: the merge check runs one job and has no suite verdict, so no job
+#      behind it, directly or not, may put a status function other than plain
+#      `success()` (`always()`, `!cancelled()`, `failure()`, `!success()`) in
+#      its `if:` — that would let it run after a failed merge check, or after
+#      the job between them was skipped by one — and the call passes no change-area
+#      input (`docs-exclude`), since the merge check has no change areas.
 #
 # An input set by a `${{ }}` expression is only known at run time: rule 8
 # treats it as possibly true (so CI_TOKEN goes with it), and rule 5 reports a
@@ -65,6 +72,8 @@ CACHE_KEYS = ("go-version-file", "working-directory", "runs-on")
 LAYOUT_KEYS = ("helm-chart", "ui-package", "embed-frontend", "frontend-build",
                "check-ent-drift", "check-gofmt")
 NPM_KEYS = ("npm-github-packages", "node-ci-flags")
+CHANGE_AREA_INPUTS = ("docs-exclude",)
+STATUS_FN = re.compile(r"(!\s*)?\b(always|cancelled|failure|success)\s*\(")
 
 failures = []
 def fail(where, msg):
@@ -113,6 +122,13 @@ def publish_ui_token_problem(passed, given):
         return "passes CI_TOKEN without npm-github-packages: true, which is all publish-ui uses it for"
     return None
 
+def bypasses_gate(cond):
+    # A job's `if:` replaces the implicit `success()` only when it calls a
+    # status function; then a failed dependency no longer skips the job.
+    # A plain `success()` keeps the gate; the other three, or a negated
+    # `!success()`, bypass it.
+    return any(neg or fn != "success" for neg, fn in STATUS_FN.findall(str(cond or "")))
+
 def needs_of(spec):
     needs = spec.get("needs") or []
     return [needs] if isinstance(needs, str) else needs
@@ -146,6 +162,16 @@ for value, token, ok in [
     given = {"CI_TOKEN": "${{ secrets.CI_TOKEN }}"} if token else {}
     if (publish_ui_token_problem(passed, given) is None) != ok:
         fail("self-check", f"publish-ui with npm-github-packages={value!r} and{'' if token else ' no'} CI_TOKEN should be {'accepted' if ok else 'refused'}")
+
+for cond, want in [
+    (None, False), ("${{ needs.release-please.outputs.x == 'true' }}", False),
+    ("${{ success() && github.ref == 'refs/heads/main' }}", False),
+    ("${{ always() }}", True), ("${{ !cancelled() }}", True),
+    ("${{ failure() || true }}", True), ("cancelled ()", True),
+    ("${{ !success() }}", True), ("${{ ! success() && true }}", True),
+]:
+    if bypasses_gate(cond) != want:
+        fail("self-check", f"bypasses_gate({cond!r}) should be {want}")
 
 templates = {p.relative_to(tpl_dir).as_posix(): p
              for p in sorted(tpl_dir.rglob("*")) if p.suffix in (".yml", ".yaml")}
@@ -258,6 +284,12 @@ for rel in docs:
     for job in jobs:
         if job != gate and gate not in ancestors(jobs, job):
             fail(where, f"job '{job}' does not depend on the merge check '{gate}'")
+        # 9. Gated by the call's own result, never past a failed merge check.
+        if gate in ancestors(jobs, job) and bypasses_gate(jobs[job].get("if")):
+            fail(where, f"job '{job}' has a status function in its `if:`: it would run after a failed merge check")
+    for key in CHANGE_AREA_INPUTS:
+        if key in (jobs[gate].get("with") or {}):
+            fail(where, f"merge check passes '{key}': the merge check has no change areas, so it has no effect")
     # 5. The same cache, layout and npm inputs as the PR suite, compared as
     # the workflow sees them (an omitted input is its default). An expression
     # is only known at run time: see differs().

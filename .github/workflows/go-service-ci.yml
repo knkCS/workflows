@@ -5,7 +5,8 @@ on:
       # Which check this run is (see CONTEXT.md): `pr-suite`, the full set a
       # pull request must pass, or `merge-check`, the light compile-level check
       # a caller runs on `push: main` — vet, UI build + typecheck and helm lint
-      # in the one `go` job, no tests and no service containers.
+      # in the `go` job alone (no `changes`, no `ci-ok`), no tests and no
+      # service containers.
       mode:                { type: string, default: pr-suite }        # pr-suite | merge-check
       go-version-file:     { type: string, default: go.mod }
       test-mode:           { type: string, default: testcontainers }  # testcontainers | services
@@ -109,10 +110,12 @@ jobs:
   # `image` (with `image-check` on) when the image area is; a docs-only PR
   # (`docs-only`, kept for the log) therefore runs none of them.
   #
-  # In `merge-check` mode every area is on, whatever the event and even with
-  # `test-changed-files` set: the merge check is what a caller gates releases
-  # on, so no change set may skip it.
+  # PR suite only. The merge check has no change areas — it always checks the
+  # whole tree, so no change set can skip the release gate — and therefore no
+  # `changes` job: it would only cost a billed minute per push to `main`.
+  # `docs-exclude` and `test-changed-files` have no effect there.
   changes:
+    if: ${{ inputs.mode != 'merge-check' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
@@ -129,14 +132,16 @@ jobs:
       # rather than implying it: the workflow cannot guess which workspace to run,
       # and a default of "the repo root" is the root-level invocation the UI job's
       # comment explains is worthless. This check lives here because `changes`
-      # is the one job EVERY run starts with, whatever it touches; it needs no
-      # checkout, so it fails in seconds, and ci-ok turns red with it.
+      # is the one job every PR suite starts with, whatever it touches; it needs
+      # no checkout, so it fails in seconds, and ci-ok turns red with it. (The
+      # merge check runs no `ui` job and ignores ui-lint/ui-test altogether.)
       - name: Reject UI gates without a UI package
         if: ${{ (inputs.ui-lint || inputs.ui-test) && inputs.ui-package == '' }}
         run: |
           echo "::error::ui-lint/ui-test require ui-package — the UI job only runs when one is set"
           exit 1
-      # An unknown mode would otherwise run as neither: refuse it loudly.
+      # An unknown mode would otherwise run as neither: refuse it loudly. Any
+      # mode but `merge-check` runs this job, so this check always gets to run.
       - name: Reject an unknown mode
         if: ${{ inputs.mode != 'pr-suite' && inputs.mode != 'merge-check' }}
         env:
@@ -167,7 +172,6 @@ jobs:
           GO_DIR: ${{ inputs.working-directory }}
           HELM_CHART: ${{ inputs.helm-chart }}
           UI_PACKAGE: ${{ inputs.ui-package }}
-          MODE: ${{ inputs.mode }}
         run: |
           set -euo pipefail
           classify() {
@@ -176,11 +180,7 @@ jobs:
           }
           every_area() { echo "$1; running every area" >&2; printf 'docs=true\ngo=true\nui=true\nimage=true\n'; }
 
-          if [ "$MODE" = merge-check ]; then
-            # The merge check checks the whole tree, whatever the event: it is
-            # the release gate, and it must never be skipped by a change set.
-            areas=$(every_area "merge check")
-          elif [ -n "$TEST_CHANGED_FILES" ]; then
+          if [ -n "$TEST_CHANGED_FILES" ]; then
             echo "::notice::test-changed-files is set: classifying a fixed change set, not the PR's"
             areas=$(printf '%s\n' "$TEST_CHANGED_FILES" | classify)
           elif [ "$EVENT" != pull_request ] && [ "$EVENT" != pull_request_target ]; then
@@ -222,9 +222,13 @@ jobs:
   # module-relative). `go-version-file` and `helm-chart` stay relative to the
   # repository root, as they always were.
   #
-  # In `merge-check` mode this job IS the merge check: the same fast Go
-  # checks, then — with a `ui-package` — `npm ci`, the UI build and `tsc --noEmit` (a Vite build does not typecheck), and
-  # no tests: no Test step and no service containers, whatever `test-mode`
+  # In `merge-check` mode this job IS the merge check, and the run's only
+  # job: no `changes` ahead of it (so it runs whatever `needs.changes` says —
+  # a skipped need would otherwise skip it) and no `ci-ok` after it. A failed
+  # step fails this job, which fails the call, so a caller's `needs:` on the
+  # call is the gate. The same fast Go checks, then — with a `ui-package` —
+  # `npm ci`, the UI build and `tsc --noEmit` (a Vite build does not
+  # typecheck), and no tests: no Test step and no service containers, whatever `test-mode`
   # says. One job, so one runner and one Go setup. Run on `push: main`, its
   # setup-go and setup-node save the Go module + build cache and the npm cache
   # under the `main` scope on a key miss, which every PR can restore — a PR
@@ -234,7 +238,10 @@ jobs:
   # raw in the checks list of every PR suite that skips this job.
   go:
     needs: changes
-    if: ${{ needs.changes.outputs.go == 'true' }}
+    # `!cancelled()` replaces the implicit `success()` only so the skipped
+    # `changes` of a merge check does not skip this job too. The PR suite
+    # still needs `changes` to have succeeded, exactly as before.
+    if: ${{ !cancelled() && (inputs.mode == 'merge-check' || (needs.changes.result == 'success' && needs.changes.outputs.go == 'true')) }}
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: ${{ inputs.test-timeout-minutes }}
     outputs:
@@ -532,11 +539,11 @@ jobs:
   # so does a job skipped because one it needed failed, since that failure is
   # in the same `needs` context. Logic in scripts/suite-verdict.sh, tested by
   # tests/change-areas/run.sh. A new job in this workflow MUST be added here.
-  # In `merge-check` mode it is the merge check's verdict too (`go` ran as the
-  # merge check, `ui` and `image` skipped): green only if it passed.
+  # PR suite only: the merge check has no suite verdict. Its one job's result
+  # is the call's result, which is what a caller's `needs:` gates on.
   ci-ok:
     needs: [changes, go, ui, image]
-    if: ${{ always() }}
+    if: ${{ always() && inputs.mode != 'merge-check' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
