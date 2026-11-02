@@ -24,11 +24,11 @@ Producing an image variant by running the other architecture's binaries under QE
 ### Checks
 
 **PR suite**:
-The full set of checks a pull request must pass — including the containerised tests — run against the PR merged with `main` as it was when the run started.
+The full set of checks a pull request must pass — including the containerised tests and the conventional-commit lint of its commit messages — run against the PR merged with `main` as it was when the run started.
 _Avoid_: CI (ambiguous), full CI
 
 **Merge check**:
-The light, compile-level check run on every push to `main` after a merge: vet, UI build and typecheck, no containerised tests. It exists to catch two individually green PRs that do not compile together.
+The light, compile-level check run on every push to `main` after a merge: vet, UI build and typecheck, no containerised tests. It exists to catch two individually green PRs that do not compile together. It has no suite verdict and no change areas: it always checks the whole tree, and whatever runs after it on `main` is gated on its own result.
 _Avoid_: main CI, post-merge CI
 
 **Change area**:
