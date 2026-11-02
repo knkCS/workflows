@@ -127,8 +127,9 @@ files into **change areas** — docs, Go, UI, image — and ends with `ci-ok`, t
   so a non-conventional message fails `changes` and turns `ci-ok` red — and
   skips the `go`, `ui` and `image` jobs, since the commits must be reworded
   and force-pushed anyway. The commits come from the same compare API as the
-  files, so the suite still needs only `contents: read`; a PR of more than 250
-  commits fails, as the API cannot list them all. A caller with a PR suite
+  files, so the suite still needs only `contents: read`; should the API ever
+  list fewer commits than the PR has, the lint fails rather than check part
+  of it. A caller with a PR suite
   therefore has **no `commitlint.yml`** — it would bill a second runner minute
   per PR run for the same lint. The merge check lints nothing (its commits
   were linted on their PR). The lint is `scripts/commit-lint.sh`.

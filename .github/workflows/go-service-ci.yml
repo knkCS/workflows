@@ -223,8 +223,8 @@ jobs:
       # wagoid/commitlint-github-action uses would need `pull-requests: read`,
       # and asking for that here would fail at startup every caller that does
       # not grant it, in both modes — a breaking change ADR 0003 keeps off
-      # `v1`. The compare API lists at most 250 commits; a longer PR fails
-      # rather than lint only part of itself. A non-PR event has no commits of
+      # `v1`. Should the pages ever list fewer commits than the PR has, the
+      # step fails rather than lint only part of it. A non-PR event has no commits of
       # its own and lints nothing. The lint itself, and the pinned commitlint
       # it installs, is scripts/commit-lint.sh.
       - name: Lint commit messages
@@ -248,11 +248,14 @@ jobs:
             echo "no pull request in context ($EVENT): no commits to lint"
             exit 0
           else
-            compare=$(gh api "repos/${REPO}/compare/${BASE_SHA}...${HEAD_SHA}" \
-              --jq '{total: .total_commits, commits: [.commits[] | {sha, message: .commit.message}]}')
+            # The compare API pages its commits (30 a page by default), so ask
+            # for 100 a page and follow every page.
+            compare=$(gh api --paginate "repos/${REPO}/compare/${BASE_SHA}...${HEAD_SHA}?per_page=100" \
+              --jq '{total: .total_commits, commits: [.commits[] | {sha, message: .commit.message}]}' \
+              | jq -cs '{total: .[0].total, commits: (map(.commits) | add // [])}')
             total=$(jq '.total' <<<"$compare")
             if [ "$total" -gt "$(jq '.commits | length' <<<"$compare")" ]; then
-              echo "::error::the pull request has $total commits, more than the compare API lists; squash some so every one can be linted"
+              echo "::error::the pull request has $total commits, but the compare API listed fewer; squash some so every one can be linted"
               exit 1
             fi
             commits=$(jq -c '.commits' <<<"$compare")
