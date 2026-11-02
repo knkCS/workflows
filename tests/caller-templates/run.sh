@@ -31,10 +31,11 @@
 #      (publish-ui has no other use for the token, so passing it would only
 #      hand it to a job that ignores it). `dry-run` is test-only;
 #   9. a `main` template's merge check is gated by GitHub's own result for the
-#      call: the merge check runs one job and has no suite verdict, so a job
-#      that `needs:` it directly must not put a status function (`always()`,
-#      `!cancelled()`, `failure()`, `cancelled()`) in its `if:` — that would
-#      run it after a failed merge check — and the call passes no change-area
+#      call: the merge check runs one job and has no suite verdict, so no job
+#      behind it, directly or not, may put a status function other than plain
+#      `success()` (`always()`, `!cancelled()`, `failure()`, `!success()`) in
+#      its `if:` — that would let it run after a failed merge check, or after
+#      the job between them was skipped by one — and the call passes no change-area
 #      input (`docs-exclude`), since the merge check has no change areas.
 #
 # An input set by a `${{ }}` expression is only known at run time: rule 8
@@ -72,7 +73,7 @@ LAYOUT_KEYS = ("helm-chart", "ui-package", "embed-frontend", "frontend-build",
                "check-ent-drift", "check-gofmt")
 NPM_KEYS = ("npm-github-packages", "node-ci-flags")
 CHANGE_AREA_INPUTS = ("docs-exclude",)
-STATUS_FN = re.compile(r"\b(always|cancelled|failure|success)\s*\(")
+STATUS_FN = re.compile(r"(!\s*)?\b(always|cancelled|failure|success)\s*\(")
 
 failures = []
 def fail(where, msg):
@@ -124,8 +125,9 @@ def publish_ui_token_problem(passed, given):
 def bypasses_gate(cond):
     # A job's `if:` replaces the implicit `success()` only when it calls a
     # status function; then a failed dependency no longer skips the job.
-    # `success()` keeps the gate, so only the other three bypass it.
-    return any(fn != "success" for fn in STATUS_FN.findall(str(cond or "")))
+    # A plain `success()` keeps the gate; the other three, or a negated
+    # `!success()`, bypass it.
+    return any(neg or fn != "success" for neg, fn in STATUS_FN.findall(str(cond or "")))
 
 def needs_of(spec):
     needs = spec.get("needs") or []
@@ -166,6 +168,7 @@ for cond, want in [
     ("${{ success() && github.ref == 'refs/heads/main' }}", False),
     ("${{ always() }}", True), ("${{ !cancelled() }}", True),
     ("${{ failure() || true }}", True), ("cancelled ()", True),
+    ("${{ !success() }}", True), ("${{ ! success() && true }}", True),
 ]:
     if bypasses_gate(cond) != want:
         fail("self-check", f"bypasses_gate({cond!r}) should be {want}")
@@ -282,7 +285,7 @@ for rel in docs:
         if job != gate and gate not in ancestors(jobs, job):
             fail(where, f"job '{job}' does not depend on the merge check '{gate}'")
         # 9. Gated by the call's own result, never past a failed merge check.
-        if gate in needs_of(jobs[job]) and bypasses_gate(jobs[job].get("if")):
+        if gate in ancestors(jobs, job) and bypasses_gate(jobs[job].get("if")):
             fail(where, f"job '{job}' has a status function in its `if:`: it would run after a failed merge check")
     for key in CHANGE_AREA_INPUTS:
         if key in (jobs[gate].get("with") or {}):

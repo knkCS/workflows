@@ -313,7 +313,7 @@ jobs:
       check-ent-drift: false
       check-gofmt: true
       embed-frontend: true
-      image-check: true  # every area is on, so only the mode keeps `image` from running
+      image-check: true  # on, yet `image` must stay skipped in merge-check mode
       image-context: tests/go-service-ci/image
     secrets:
       CI_TOKEN: ${{ secrets.GITHUB_TOKEN }}
