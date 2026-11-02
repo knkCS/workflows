@@ -94,12 +94,24 @@ cache, layout and npm inputs.
    and delete what it finds.
 9. **Update your row in the [adoption status](#adoption-status) table.**
 
-A repo-specific check the shared workflow cannot express (a scope check, a
-second Go module, buf, a frontend suite `ui-test` does not cover) stays a job
-of its own in the caller's `ci.yml`, beside the `ci` job — with its own
-`timeout-minutes`, and inheriting the file's concurrency. Say in a comment why
-it cannot be an input, and prefer asking for the input here if it would
-generalise.
+A repo-specific check the shared workflow cannot express never gets a job of
+its own: each job repeats checkout and setup, and is billed at least a minute
+for a few seconds of work. Instead:
+
+- **Go checks go in the hook** — the PR suite's `go-extra-checks` input (a
+  scope check, a gen-module build, collisions, verify-generated). They run in
+  the shared `go` job, on its Go setup, module cache and private-module
+  credential, only when the Go change area changed; a failure fails the
+  **Go extra checks** step and so `ci / ci-ok` (README, "Your own checks").
+  The hook does not run in the merge check: a check that must also gate a
+  release stays a job of the `main` template, beside the merge check.
+- **Everything else goes into one `repo-checks` job** in the caller's
+  `ci.yml`, beside the `ci` job — buf lint and generate drift, the `web`
+  frontend suite `ui-test` does not cover — one named step per check, with
+  its own `timeout-minutes`, inheriting the file's concurrency.
+
+Say in a comment why a check cannot be an input, and prefer asking for the
+input here if it would generalise.
 
 ## The `CI_TOKEN` secret
 
