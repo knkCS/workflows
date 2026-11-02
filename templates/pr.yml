@@ -13,6 +13,8 @@
 # - `@v1`, never a SHA or `@main` (ADR 0003).
 # - No `timeout-minutes` here: GitHub rejects it on a job that calls a
 #   reusable workflow; go-service-ci's own jobs carry theirs.
+# - The suite lints the PR's commit messages itself (in its `changes` job),
+#   so a repo with this file has no commitlint.yml: delete it.
 #
 # The check to wait for (and, where the plan allows, to require in branch
 # protection — ADR 0002) is `ci / ci-ok`, the suite verdict. Keep the job
@@ -25,6 +27,10 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+# contents: read is all the suite needs, its commit lint included: `changes`
+# lists the PR's files and commits from the compare API. Do not add more — a
+# called workflow can never have more than its caller, and this one asks for
+# nothing else.
 permissions:
   contents: read
 

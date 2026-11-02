@@ -28,8 +28,8 @@ decisions behind the rules are ADRs [0001](adr/0001-arm64-is-a-developer-platfor
 
 | Template | Copy to | For | What it wires |
 |---|---|---|---|
-| [`templates/pr.yml`](../templates/pr.yml) | `.github/workflows/ci.yml` | both publish models | The PR suite: `go-service-ci` on `pull_request`, superseded runs cancelled |
-| [`templates/commitlint.yml`](../templates/commitlint.yml) | `.github/workflows/commitlint.yml` | both publish models | Conventional-commit linting on `pull_request` |
+| [`templates/pr.yml`](../templates/pr.yml) | `.github/workflows/ci.yml` | both publish models | The PR suite: `go-service-ci` on `pull_request`, superseded runs cancelled, the commit messages linted in its `changes` job |
+| [`templates/commitlint.yml`](../templates/commitlint.yml) | `.github/workflows/commitlint.yml` | repos **without** a PR suite (deploy repos, docs and skills repos) | Conventional-commit linting on `pull_request` |
 | [`templates/release/main.yml`](../templates/release/main.yml) | `.github/workflows/main.yml` | the release model | On `push: main`: merge check → release-please → `publish-image-chart` / `publish-ui` |
 | [`templates/staging-image/main.yml`](../templates/staging-image/main.yml) | `.github/workflows/main.yml` | the staging image model | On `push: main`: merge check → `staging-image` |
 
@@ -58,7 +58,8 @@ it into the wrong file cannot cancel a publish.
 This repo's self-test lints every template with actionlint and runs
 `tests/caller-templates/run.sh`, which checks what actionlint cannot see
 across the `@v1` boundary: every input and secret a template passes is one the
-called workflow declares, every call is `@v1`, the `main` templates gate
+called workflow declares, every permission the called workflow asks for is
+granted, every call is `@v1`, the `main` templates gate
 everything on the merge check, and the merge check passes the PR suite's
 cache, layout and npm inputs.
 
@@ -69,10 +70,16 @@ cache, layout and npm inputs.
    [staging image](#staging-image) model.
 2. **Set the `CI_TOKEN` secret** with the access your repo needs
    ([below](#the-ci_token-secret)).
-3. **Copy `templates/pr.yml` and `templates/commitlint.yml`.** Fill in the
+3. **Copy `templates/pr.yml`.** Fill in the
    `<placeholders>`; delete the inputs you do not need (the README's
    `go-service-ci` input table says what each does). Remove `push: main`
    from the existing PR suite workflow — `main` runs the merge check instead.
+   **Delete the repo's `commitlint.yml`**: the PR suite lints the commit
+   messages in its `changes` job, and a second lint bills a runner minute per
+   PR run for nothing (#93 — once `v1` includes it; until then keep
+   `commitlint.yml`, or PRs go unlinted). Keep `permissions: contents: read`
+   as the template has it; the suite needs nothing more. A repo without a PR
+   suite copies `templates/commitlint.yml` instead.
 4. **Copy your model's `main` template.** It replaces the repo's existing
    release workflow. Pass the merge check exactly the `go-version-file`,
    `working-directory` and `runs-on` the PR suite passes, and the same layout
@@ -253,8 +260,8 @@ statushub's config is the reference:
 ```
 
 Versions come from the conventional-commit types on `main` (`feat` → minor,
-`fix` → patch, `!` → breaking), which is why `commitlint.yml` runs on every PR:
-a mislabelled commit ships a wrong version.
+`fix` → patch, `!` → breaking), which is why the PR suite lints every PR's
+commit messages: a mislabelled commit ships a wrong version.
 
 ### Staging image
 
@@ -406,7 +413,8 @@ but row 8's `uses:` lines, whose `needs:` you check by eye.
 | 8 | **Release not gated on the merge check** — a `release-please` call without `needs:` on the merge check, or in a workflow of its own | `grep -rn -B2 -A2 'release-please.yml@' .github/workflows/` and look for the `needs:` | The release `main` template |
 | 9 | **Publishing from a tag-triggered workflow** that expects release-please's tags (they are created with `GITHUB_TOKEN` and trigger nothing) | `grep -rn -A3 'tags:' .github/workflows/` | Publish jobs gated on release-please's outputs in `main.yml` |
 | 10 | **`CI_TOKEN` passed to release-please** (directly or by `secrets: inherit`) | `grep -rn -A4 'release-please.yml@' .github/workflows/ \| grep -E '^\S+-[0-9]+-\s*secrets:'` | No secrets on that job ([`CI_TOKEN`](#the-ci_token-secret)) |
-| 11 | **Test-only inputs** in a caller | `grep -rnE 'test-changed-files\|test-soft-fail' .github/workflows/` | Delete them — they exist for this repo's self-test only |
+| 11 | **Test-only inputs** in a caller | `grep -rnE 'test-changed-files\|test-commits\|test-soft-fail' .github/workflows/` | Delete them — they exist for this repo's self-test only |
+| 12 | **A commitlint workflow beside the PR suite** — it lints what the suite's `changes` job already lints, for a runner minute per PR run | `grep -rlE 'commitlint(-github-action\|\.yml@)' .github/workflows/` in a repo whose `ci.yml` calls `go-service-ci` | Delete it, once `v1` includes #93 (the PR suite lints the commits) |
 
 ## Adoption status
 

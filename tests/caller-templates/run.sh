@@ -37,6 +37,12 @@
 #      its `if:` — that would let it run after a failed merge check, or after
 #      the job between them was skipped by one — and the call passes no change-area
 #      input (`docs-exclude`), since the merge check has no change areas.
+#  10. every call grants each permission the called workflow asks for, at its
+#      top level or on any of its jobs: a reusable workflow asking for more
+#      than its caller grants fails at startup. So the commitlint template
+#      grants `pull-requests: read` (the action lists the PR's commits), and
+#      the PR suite, whose `changes` job lints commits from the compare API,
+#      needs `contents: read` alone.
 #
 # An input set by a `${{ }}` expression is only known at run time: rule 8
 # treats it as possibly true (so CI_TOKEN goes with it), and rule 5 reports a
@@ -65,7 +71,7 @@ wf_dir = root / ".github" / "workflows"
 PR_SUITE = "pr.yml"
 RELEASE_MAIN = "release/main.yml"
 REQUIRED = {PR_SUITE, RELEASE_MAIN, "commitlint.yml"}
-TEST_ONLY_INPUTS = {"test-changed-files", "test-soft-fail", "dry-run"}
+TEST_ONLY_INPUTS = {"test-changed-files", "test-commits", "test-soft-fail", "dry-run"}
 CALL = re.compile(r"^knkcs/workflows/\.github/workflows/([A-Za-z0-9_.-]+\.ya?ml)@(.+)$", re.I)
 CANCEL = "${{ github.event_name == 'pull_request' }}"
 CACHE_KEYS = ("go-version-file", "working-directory", "runs-on")
@@ -122,6 +128,38 @@ def publish_ui_token_problem(passed, given):
         return "passes CI_TOKEN without npm-github-packages: true, which is all publish-ui uses it for"
     return None
 
+LEVELS = {"none": 0, "read": 1, "write": 2}
+
+def permission_map(perms):
+    # A `permissions:` value as {scope: level}; None when it is not set, so
+    # the token's defaults (unknown here) apply. `read-all`/`write-all` are
+    # every scope; "*" stands for that.
+    if perms is None:
+        return None
+    if isinstance(perms, str):
+        return {"*": perms.split("-")[0]}
+    return {k: str(v) for k, v in (perms or {}).items()}
+
+def asked_for(workflow):
+    # Every permission a called workflow declares, top level or on any job,
+    # at the highest level it asks for each.
+    doc = yaml.safe_load((wf_dir / workflow).read_text())
+    asked = {}
+    for perms in [doc.get("permissions")] + [s.get("permissions") for s in (doc.get("jobs") or {}).values()]:
+        for scope, level in (permission_map(perms) or {}).items():
+            if LEVELS.get(level, 0) > LEVELS.get(asked.get(scope, "none"), 0):
+                asked[scope] = level
+    return asked
+
+def missing_grants(granted, asked):
+    # The permissions in `asked` that `granted` falls short of, as "scope: level".
+    if granted is None:
+        return []
+    def level_of(scope):
+        return max(LEVELS.get(granted.get(scope, "none"), 0), LEVELS.get(granted.get("*", "none"), 0))
+    return [f"{scope}: {level}" for scope, level in sorted(asked.items())
+            if LEVELS.get(level, 0) > level_of(scope)]
+
 def bypasses_gate(cond):
     # A job's `if:` replaces the implicit `success()` only when it calls a
     # status function; then a failed dependency no longer skips the job.
@@ -162,6 +200,16 @@ for value, token, ok in [
     given = {"CI_TOKEN": "${{ secrets.CI_TOKEN }}"} if token else {}
     if (publish_ui_token_problem(passed, given) is None) != ok:
         fail("self-check", f"publish-ui with npm-github-packages={value!r} and{'' if token else ' no'} CI_TOKEN should be {'accepted' if ok else 'refused'}")
+for granted, asked, want in [
+    ({"contents": "read"}, {"contents": "read"}, []),
+    ({"contents": "read"}, {"contents": "read", "pull-requests": "read"}, ["pull-requests: read"]),
+    ({"contents": "read"}, {"contents": "write"}, ["contents: write"]),
+    ({"contents": "write"}, {"contents": "read"}, []),
+    ({"*": "read"}, {"pull-requests": "read"}, []),
+    (None, {"pull-requests": "write"}, []),
+]:
+    if missing_grants(granted, asked) != want:
+        fail("self-check", f"missing_grants({granted!r}, {asked!r}) should be {want}")
 
 for cond, want in [
     (None, False), ("${{ needs.release-please.outputs.x == 'true' }}", False),
@@ -239,6 +287,11 @@ for rel, path in templates.items():
         for name, decl in secrets.items():
             if (decl or {}).get("required") and name not in given:
                 fail(where, f"job '{job}' omits {workflow}'s required secret '{name}'")
+        # 10. The caller grants every permission the called workflow asks for:
+        # the calling job's own `permissions:` if set, else the workflow's.
+        granted = permission_map(spec.get("permissions", doc.get("permissions")))
+        for perm in missing_grants(granted, asked_for(workflow)):
+            fail(where, f"job '{job}' calls {workflow}, which asks for `{perm}` that the caller does not grant: it would fail at startup")
         # 8. publish-ui's CI_TOKEN goes with npm-github-packages, and only with it.
         if workflow == "publish-ui.yml":
             problem = publish_ui_token_problem(passed, given)
@@ -337,5 +390,5 @@ for rel in docs:
 if failures:
     print("\nFAIL", *failures, sep="\n  ")
     sys.exit(1)
-print("\nPASS: every caller template pins @v1, calls only declared inputs, cancels on PRs only, gates on the merge check and publishes the release tag")
+print("\nPASS: every caller template pins @v1, calls only declared inputs, grants the permissions it calls for, cancels on PRs only, gates on the merge check and publishes the release tag")
 PY
