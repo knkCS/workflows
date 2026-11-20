@@ -242,7 +242,8 @@ reads them.
 | `npm-github-packages` | boolean | `false` | Authenticate `npm ci` to `npm.pkg.github.com` with `CI_TOKEN` in the `ui` job |
 | `check-ent-drift` | boolean | `true` | Regenerate `internal/ent` and fail if `internal/ent/db` drifts |
 | `check-gofmt` | boolean | `false` | Fail the `go` job if any **tracked** Go file under `working-directory` is not gofmt-clean |
-| `runs-on` | string | `ubuntu-latest` | Runner label for the `go` job (the other jobs stay on `ubuntu-latest`). `services` mode needs a Linux runner with Docker |
+| `runs-on` | string | `ubuntu-latest` | Runner label for the `go` job (the other jobs follow `aux-runs-on`). `services` mode needs a Linux runner with Docker |
+| `aux-runs-on` | string | `ubuntu-latest` | Runner label for every other job: `changes`, `ui`, `image`, `ci-ok`. Set it and `runs-on` to a self-hosted runner's label to run the whole suite there (see [Self-hosted runners](#self-hosted-runners)) |
 | `working-directory` | string | `.` | Where the Go module lives, relative to the repo root (e.g. `go`). Every command of the `go` job runs there; `go-version-file` and `helm-chart` stay root-relative, so pass e.g. `go-version-file: go/go.mod` too |
 | `go-private-extra` | string | `""` | Extra `GOPRIVATE` patterns (comma-, space- or newline-separated), added to the `github.com/knkcs/*,github.com/knkcms/*` default — only for private modules outside both orgs (see [private Go modules](#private-go-modules)) |
 | `image-check` | boolean | `false` | Build the image in the `image` job when the image change area changed: amd64 only, GHA-cached, never pushed, `CI_TOKEN` as the BuildKit secret `ci_token` (see below) |
@@ -297,6 +298,48 @@ to a caller's CI. Five things to know before turning them on:
   requires. The GHA build cache shares `publish-image-chart`'s `amd64` scope:
   a PR starts warm from the last publish on `main`, and its own cache entries
   stay under the PR's ref, where no release can read them.
+
+### Self-hosted runners
+
+`go-service-ci.yml` runs on GitHub-hosted `ubuntu-latest` unless told
+otherwise. `runs-on` picks the `go` job's runner (in the merge check, the
+only job) and `aux-runs-on` the runner of `changes`, `ui`, `image` and
+`ci-ok`. A caller that cannot use GitHub-hosted minutes passes its runner's
+label to both — a single custom label such as `acp-hans` selects that runner:
+
+```yaml
+    with:
+      runs-on: acp-hans
+      aux-runs-on: acp-hans
+```
+
+Both inputs are strings, so each takes one label. Both default to
+`ubuntu-latest`, so a caller that sets neither is unchanged. Keep `runs-on`
+identical in the PR suite and the merge check (it is part of the Go cache
+key); `aux-runs-on` has no effect on the merge check, which runs only the `go`
+job.
+
+No step uses `sudo` or `apt`; the setup actions (`setup-go`, `setup-node`,
+`setup-helm`, `setup-buildx`) download their tools into the runner's tool
+cache. What they cannot download, a self-hosted runner must already have:
+
+| Needed by | What |
+|---|---|
+| every job | Linux x64, `bash`, `git` 2.32 or later (for `GIT_CONFIG_GLOBAL`), `curl`, `tar` |
+| `changes` | `gh` and `jq` (the compare API and the classifier), `node` and `npm` on `PATH` (the commit lint installs commitlint with them; the job has no `setup-node`) |
+| `go` | a C compiler (`gcc`): `go test -race` needs cgo. Docker, usable by the runner's user without `sudo`, for `testcontainers` mode and for `services` mode's service containers — which publish ports 5432 and 6379 on the host, so nothing else on it may listen there |
+| `ui` with `ui-test` | the system libraries of the browser the caller's tests drive. A caller's `pretest` should run `playwright install chromium` without `--with-deps`: `--with-deps` installs those libraries with `apt` as root, which a self-hosted runner must have done once already (`sudo npx playwright install-deps chromium`) |
+| `image` | Docker, as for `go`; `setup-buildx` creates its builder in it |
+
+Two things are different on a runner that outlives its job, and the workflow
+handles both: the `go` job writes `CI_TOKEN` into a job-scoped global git
+config (`GIT_CONFIG_GLOBAL` in `RUNNER_TEMP`, seeded with the user's
+`~/.gitconfig`) rather than the user's own, and `npm-github-packages` writes
+it into a job-scoped npm user config (`NPM_CONFIG_USERCONFIG`, seeded with the
+user's `~/.npmrc`). Neither token outlives the job. What does outlive it — the
+tool cache, `~/.cache` (Playwright's browsers, Go's build cache) and Docker's
+images — is a cache, not state. One runner takes one job at a time, so the
+suite's jobs queue behind each other on a single self-hosted runner.
 
 ### Your own checks: `go-extra-checks` and `repo-checks`
 

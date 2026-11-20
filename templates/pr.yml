@@ -45,6 +45,10 @@ jobs:
       go-version-file: go.mod
       working-directory: .
       runs-on: ubuntu-latest
+      # The runner of the suite's other jobs (changes, ui, image, ci-ok). Set
+      # it and runs-on to a self-hosted runner's label to run the whole suite
+      # there (README, "Self-hosted runners").
+      aux-runs-on: ubuntu-latest
       # testcontainers (Docker in the job) or services (Postgres + Redis).
       test-mode: testcontainers
       # The layout inputs. Delete the ones your repo has no use for.
