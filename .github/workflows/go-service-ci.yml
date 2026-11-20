@@ -18,13 +18,21 @@ on:
       ui-test:             { type: boolean, default: false }          # each UI workspace's own `test` script
       helm-chart:          { type: string, default: "" }
       node-ci-flags:       { type: string, default: "" }
-      npm-github-packages: { type: boolean, default: false }          # write CI_TOKEN into ~/.npmrc so `npm ci` can reach npm.pkg.github.com
+      npm-github-packages: { type: boolean, default: false }          # give `npm ci` CI_TOKEN for npm.pkg.github.com (job-scoped npm user config)
       check-ent-drift:     { type: boolean, default: true }
       check-gofmt:         { type: boolean, default: false }          # fail on a tracked Go file that is not gofmt-clean
-      # The Go job's runner. A string, so today one label; the default keeps
-      # every caller on GitHub-hosted runners until a self-hosted one exists.
-      # `services` test mode needs a Linux runner with Docker.
+      # The Go job's runner. A string, so one label (a self-hosted runner's
+      # own label, e.g. `acp-hans`, selects it alone); the default keeps
+      # every caller on GitHub-hosted runners. `services` test mode needs a
+      # Linux runner with Docker.
       runs-on:             { type: string, default: ubuntu-latest }
+      # The runner of every other job: `changes`, `ui`, `image` and `ci-ok`.
+      # Separate from `runs-on` so a caller can move only the Go job, and
+      # defaulting to `ubuntu-latest` so a caller that sets neither, or only
+      # `runs-on`, runs exactly as before. A caller with no GitHub-hosted
+      # minutes sets both to its self-hosted runner's label. What such a
+      # runner must have installed: README, "Self-hosted runners".
+      aux-runs-on:         { type: string, default: ubuntu-latest }
       # Where the Go module lives, relative to the repo root (e.g. `go` for a
       # repo whose go.mod is go/go.mod). Every `run:` step of the Go job runs
       # there; `go-version-file` and `helm-chart` stay root-relative.
@@ -132,7 +140,7 @@ jobs:
   # runs the suite again.
   changes:
     if: ${{ inputs.mode != 'merge-check' }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.aux-runs-on }}
     timeout-minutes: 10
     outputs:
       docs: ${{ steps.classify.outputs.docs }}
@@ -329,6 +337,20 @@ jobs:
           --health-timeout 5s --health-retries 5
     steps:
       - uses: actions/checkout@v6
+      # configure-private-modules writes CI_TOKEN into the GLOBAL git config
+      # (a url.insteadOf). A GitHub-hosted runner is thrown away after the job;
+      # a self-hosted runner's home directory is not, so there the token would
+      # stay in the runner user's ~/.gitconfig and rewrite every later
+      # github.com URL of that user — other jobs, and anything else the user
+      # runs on the host. So the job gets a global config of its own in
+      # RUNNER_TEMP (emptied after every job), seeded with the user's, and
+      # GIT_CONFIG_GLOBAL points every later step's git at it. On a
+      # GitHub-hosted runner this changes nothing observable.
+      - name: Keep the global git config in the job
+        run: |
+          cfg="$RUNNER_TEMP/gitconfig"
+          if [ -f "$HOME/.gitconfig" ]; then cp "$HOME/.gitconfig" "$cfg"; else : >"$cfg"; fi
+          echo "GIT_CONFIG_GLOBAL=$cfg" >>"$GITHUB_ENV"
       # GOPRIVATE covers github.com/knkcs/* and github.com/knkcms/* (plus
       # `go-private-extra`), and CI_TOKEN is injected for all of github.com —
       # so the token must read every private module in the graph.
@@ -417,7 +439,15 @@ jobs:
       - name: Authenticate npm to GitHub Packages
         if: ${{ inputs.mode == 'merge-check' && inputs.ui-package != '' && inputs.npm-github-packages }}
         working-directory: ${{ github.workspace }}
-        run: echo "//npm.pkg.github.com/:_authToken=${CI_TOKEN}" >> ~/.npmrc
+        # A job-scoped copy of the user's npm config, not ~/.npmrc itself: on a
+        # self-hosted runner ~/.npmrc outlives the job and would keep the token
+        # (and grow by a line every run). RUNNER_TEMP is emptied after the job.
+        run: |
+          cfg="$RUNNER_TEMP/npmrc"
+          src="${NPM_CONFIG_USERCONFIG:-$HOME/.npmrc}"
+          if [ -f "$src" ]; then cp "$src" "$cfg"; else : >"$cfg"; fi
+          echo "//npm.pkg.github.com/:_authToken=${CI_TOKEN}" >>"$cfg"
+          echo "NPM_CONFIG_USERCONFIG=$cfg" >>"$GITHUB_ENV"
         env:
           CI_TOKEN: ${{ secrets.CI_TOKEN }}
       - name: Install UI dependencies
@@ -478,7 +508,7 @@ jobs:
   ui:
     needs: changes
     if: ${{ needs.changes.outputs.ui == 'true' && inputs.ui-package != '' && inputs.mode != 'merge-check' }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.aux-runs-on }}
     timeout-minutes: ${{ inputs.ui-timeout-minutes }}
     steps:
       - uses: actions/checkout@v6
@@ -487,7 +517,8 @@ jobs:
       # GitHub Packages refuses even public-package installs without a token, so
       # a caller whose lockfile pulls anything from npm.pkg.github.com (e.g. the
       # @knkcms scope) 401s on a bare `npm ci`. Opting in writes ONLY the
-      # credential, and to the runner's user-level ~/.npmrc — the scope→registry
+      # credential, and to the job's user-level npm config (a copy of the
+      # runner's ~/.npmrc, see the step) — the scope→registry
       # mapping belongs in the caller's committed .npmrc, where the caller
       # decides which scopes resolve to GitHub Packages; without that mapping
       # this token is simply never consulted. Same credential shape knkcms/core's
@@ -496,7 +527,15 @@ jobs:
       # interpolating would paste the secret into the rendered script itself.
       - name: Authenticate npm to GitHub Packages
         if: ${{ inputs.npm-github-packages }}
-        run: echo "//npm.pkg.github.com/:_authToken=${CI_TOKEN}" >> ~/.npmrc
+        # A job-scoped copy of the user's npm config, not ~/.npmrc itself: on a
+        # self-hosted runner ~/.npmrc outlives the job and would keep the token
+        # (and grow by a line every run). RUNNER_TEMP is emptied after the job.
+        run: |
+          cfg="$RUNNER_TEMP/npmrc"
+          src="${NPM_CONFIG_USERCONFIG:-$HOME/.npmrc}"
+          if [ -f "$src" ]; then cp "$src" "$cfg"; else : >"$cfg"; fi
+          echo "//npm.pkg.github.com/:_authToken=${CI_TOKEN}" >>"$cfg"
+          echo "NPM_CONFIG_USERCONFIG=$cfg" >>"$GITHUB_ENV"
         env:
           CI_TOKEN: ${{ secrets.CI_TOKEN }}
       - run: npm ci ${{ inputs.node-ci-flags }}
@@ -576,7 +615,7 @@ jobs:
   image:
     needs: changes
     if: ${{ inputs.image-check && needs.changes.outputs.image == 'true' && inputs.mode != 'merge-check' }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.aux-runs-on }}
     timeout-minutes: ${{ inputs.image-timeout-minutes }}
     steps:
       - uses: actions/checkout@v6
@@ -605,7 +644,7 @@ jobs:
   ci-ok:
     needs: [changes, go, ui, image]
     if: ${{ always() && inputs.mode != 'merge-check' }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.aux-runs-on }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
