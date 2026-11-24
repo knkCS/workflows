@@ -232,6 +232,8 @@ reads them.
 | `go-version-file` | string | `go.mod` | File `setup-go` reads the toolchain version from |
 | `test-mode` | string | `testcontainers` | `testcontainers` (Docker-in-job) or `services` (Postgres + Redis service containers) |
 | `test-timeout` | string | `30m` | `go test -timeout`. Explicit because Go's default is 600s **per package** |
+| `test-cover` | boolean | `true` | Pass `-cover` to `go test`. Turn it off when nothing reads the coverage: it slows the race-enabled tests |
+| `go-cache` | boolean | `true` | Restore and save the Go module and build cache through GitHub's cache in the `go` job. Turn it off on a self-hosted runner whose caches persist on disk, where moving them costs more than it saves |
 | `embed-frontend` | boolean | `false` | Write a `web/dist/index.html` stub (under `working-directory`) so a `go:embed` compiles in the `go` job |
 | `frontend-build` | boolean | `false` | Build the `web` workspace in the `ui` job — and, with `ui-lint`, lint it too |
 | `ui-package` | string | `""` | Workspace to build and typecheck. **Empty means the `ui` job does not run at all** |

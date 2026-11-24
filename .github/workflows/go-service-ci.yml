@@ -11,6 +11,12 @@ on:
       go-version-file:     { type: string, default: go.mod }
       test-mode:           { type: string, default: testcontainers }  # testcontainers | services
       test-timeout:        { type: string, default: 30m }             # go test -timeout; see the Test steps
+      test-cover:          { type: boolean, default: true }           # pass -cover to go test; off when no one reads coverage
+      # Whether the `go` job's setup-go restores and saves the Go module and
+      # build cache through GitHub's cache. A self-hosted runner whose
+      # GOMODCACHE and GOCACHE persist on disk turns it off: moving a cache
+      # the runner already has can cost more than the tests (knkCS/workflows#113).
+      go-cache:            { type: boolean, default: true }
       embed-frontend:      { type: boolean, default: false }
       frontend-build:      { type: boolean, default: false }
       ui-package:          { type: string, default: "" }
@@ -365,7 +371,7 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: ${{ inputs.go-version-file }}
-          cache: true
+          cache: ${{ inputs.go-cache }}
           cache-dependency-path: ${{ inputs.working-directory }}/go.sum
       - name: Create frontend stub for embed
         if: ${{ inputs.embed-frontend }}
@@ -500,7 +506,7 @@ jobs:
       - name: Test
         id: test
         if: ${{ inputs.mode != 'merge-check' }}
-        run: go test -race -cover -timeout ${{ inputs.test-timeout }} ./...
+        run: go test -race ${{ inputs.test-cover && '-cover' || '' }} -timeout ${{ inputs.test-timeout }} ./...
 
   # Runs only when the UI change area changed (or a file in no area), and only
   # for a caller with a `ui-package`. Never in `merge-check` mode, where the
