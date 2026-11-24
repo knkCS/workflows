@@ -294,6 +294,10 @@ jobs:
       go-version-file: tests/go-service-ci/go-services-module/go.mod
       working-directory: tests/go-service-ci/go-services-module
       check-ent-drift: false
+      # A self-hosted runner's settings (#113): no GitHub Go cache and no
+      # coverage, so this suite proves the Test step runs without either.
+      go-cache: false
+      test-cover: false
     secrets:
       CI_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
